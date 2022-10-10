@@ -22,9 +22,9 @@ class VarifocalLoss(nn.Module):
 
     def forward(self, pred_score, gt_score, label, alpha=0.75, gamma=2.0):
         gt_score = gt_score * label
-        weight = alpha * pred_score.pow(gamma) * (1 - label) + gt_score# * label
+        weight = alpha * pred_score.sigmoid().pow(gamma) * (1 - label) + gt_score# * label
         with torch.cuda.amp.autocast(enabled=False):
-            loss = F.binary_cross_entropy(pred_score.float(), label.float(), reduction='none') * weight
+            loss = F.binary_cross_entropy_with_logits(pred_score.float(), label.float(), reduction='none') * weight
         return loss
 
 
@@ -125,7 +125,7 @@ class ComputeLoss:
         self.balance = {3: [4.0, 1.0, 0.4]}.get(m.nl, [4.0, 1.0, 0.25, 0.06, 0.02])  # P3-P7
         self.ssi = list(m.stride).index(16) if autobalance else 0  # stride 16 index
         self.BCEcls, self.BCEobj, self.gr, self.hyp, self.autobalance = BCEcls, BCEobj, 1.0, h, autobalance
-        self.BCEcls2 = VarifocalLoss()
+        self.BCEcls2 = VarifocalLoss().cuda()
         self.nc = m.nc  # number of classes
         self.nl = m.nl  # number of layers
         self.anchors = m.anchors
@@ -175,7 +175,7 @@ class ComputeLoss:
                     t = torch.full_like(pcls, self.cn, device=self.device)  # targets
                     t[range(n), tcls[i]] = self.cp
                     # lcls += self.BCEcls(pcls, t)  # BCE
-                    lcls += self.BCEcls2(pred_score=pcls.sigmoid(), gt_score=tobj[b, gj, gi][:, None], label=t).mean()
+                    lcls += self.BCEcls2(pred_score=pcls, gt_score=iou[:, None], label=t).mean()
 
                 # Append targets to text file
                 # with open('targets.txt', 'a') as file:
