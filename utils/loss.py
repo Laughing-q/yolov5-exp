@@ -24,7 +24,7 @@ class VarifocalLoss(nn.Module):
         gt_score = gt_score * label
         weight = alpha * pred_score.pow(gamma) * (1 - label) + gt_score# * label
         with torch.cuda.amp.autocast(enabled=False):
-            loss = F.binary_cross_entropy(pred_score.float(), gt_score.float(), reduction='none') * weight
+            loss = F.binary_cross_entropy(pred_score.float(), label.float(), reduction='none') * weight
         return loss
 
 
