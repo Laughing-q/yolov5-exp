@@ -158,26 +158,33 @@ class ComputeLoss:
                 pxy = pxy.sigmoid() * 1.6 - 0.3
                 pwh = (0.2 + pwh.sigmoid() * 4.8) * self.anchors[i]
                 pbox = torch.cat((pxy, pwh), 1)  # predicted box
-                iou = bbox_iou(pbox, tbox[i], CIoU=True).squeeze()  # iou(prediction, target)
-                iou_idx = iou > 0.1
-                lbox += (1.0 - iou[iou_idx]).mean()  # iou loss
+                torch_iou = bbox_iou(pbox, tbox[i], CIoU=True).squeeze()  # iou(prediction, target)
+                # iou_idx = iou > 0.1
 
                 # Objectness
-                iou = iou[iou_idx].detach().clamp(0).type(tobj.dtype)
+                iou = torch_iou.detach().clamp(0).type(tobj.dtype)
+
+                # Classification
+                metric = iou
+                if self.nc > 1:  # cls loss (only if multiple classes)
+                    cls_score = pcls[range(len(pcls)), tcls[i]]
+                    metric = iou.pow(6.0) * cls_score.pow(1.0)
+
+                    pcls = pcls[metric > 0.05]
+                    t = torch.full_like(pcls, self.cn, device=self.device)  # targets
+                    t[range(len(pcls)), tcls[i][metric > 0.05]] = self.cp
+                    lcls += self.BCEcls(pcls, t)  # BCE
+                    # lcls += self.BCEcls2(pred_score=pcls, gt_score=iou[:, None], label=t).mean()
+                iou_index = metric > 0.05
+
                 if self.sort_obj_iou:
                     j = iou.argsort()
                     b, gj, gi, iou = b[j], gj[j], gi[j], iou[j]
                 if self.gr < 1:
                     iou = (1.0 - self.gr) + self.gr * iou
-                tobj[b[iou_idx], gj[iou_idx], gi[iou_idx]] = iou  # iou ratio
+                tobj[b[iou_index], gj[iou_index], gi[iou_index]] = iou  # iou ratio
 
-                # Classification
-                if self.nc > 1:  # cls loss (only if multiple classes)
-                    pcls = pcls[iou_idx]
-                    t = torch.full_like(pcls, self.cn, device=self.device)  # targets
-                    t[range(len(pcls)), tcls[i][iou_idx]] = self.cp
-                    lcls += self.BCEcls(pcls, t)  # BCE
-                    # lcls += self.BCEcls2(pred_score=pcls, gt_score=iou[:, None], label=t).mean()
+                lbox += (1.0 - torch_iou[iou_index]).mean()  # iou loss
 
                 # Append targets to text file
                 # with open('targets.txt', 'a') as file:
