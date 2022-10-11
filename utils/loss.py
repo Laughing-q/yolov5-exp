@@ -168,7 +168,8 @@ class ComputeLoss:
                 metric = iou
                 if self.nc > 1:  # cls loss (only if multiple classes)
                     cls_score = pcls[range(len(pcls)), tcls[i]]
-                    metric = iou.pow(6.0) * cls_score.pow(1.0)
+                    # metric = iou.pow(6.0) * cls_score.sigmoid().pow(1.0)
+                    metric = (iou.pow(1.0) + cls_score.sigmoid().pow(1.0)) / 2
 
                     pcls = pcls[metric > 0.05]
                     t = torch.full_like(pcls, self.cn, device=self.device)  # targets
@@ -182,7 +183,7 @@ class ComputeLoss:
                     b, gj, gi, iou = b[j], gj[j], gi[j], iou[j]
                 if self.gr < 1:
                     iou = (1.0 - self.gr) + self.gr * iou
-                tobj[b[iou_index], gj[iou_index], gi[iou_index]] = iou  # iou ratio
+                tobj[b[iou_index], gj[iou_index], gi[iou_index]] = iou[iou_index]  # iou ratio
 
                 lbox += (1.0 - torch_iou[iou_index]).mean()  # iou loss
 
