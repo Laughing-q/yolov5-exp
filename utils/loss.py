@@ -234,4 +234,4 @@ class ComputeLoss:
             tbox.append(torch.cat((gxy - gij, gwh), 1))  # box
             tcls.append(c)  # class
 
-        return tcls, tbox, 
+        return tcls, tbox, indices
