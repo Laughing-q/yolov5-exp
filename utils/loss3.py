@@ -5,6 +5,7 @@ Loss functions
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from utils.metrics import bbox_iou
 from utils.torch_utils import de_parallel
@@ -13,6 +14,18 @@ from utils.torch_utils import de_parallel
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
     # return positive, negative label smoothing BCE targets
     return 1.0 - 0.5 * eps, 0.5 * eps
+
+class VarifocalLoss(nn.Module):
+    # Varifocal loss by Zhang et al. https://arxiv.org/abs/2008.13367
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred_score, gt_score, label, alpha=0.75, gamma=2.0):
+        gt_score = gt_score * label
+        weight = alpha * pred_score.sigmoid().pow(gamma) * (1 - label) + gt_score# * label
+        with torch.cuda.amp.autocast(enabled=False):
+            loss = F.binary_cross_entropy_with_logits(pred_score.float(), label.float(), reduction='none') * weight
+        return loss
 
 
 class BCEBlurWithLogitsLoss(nn.Module):
@@ -112,6 +125,7 @@ class ComputeLoss:
         self.balance = {3: [4.0, 1.0, 0.4]}.get(m.nl, [4.0, 1.0, 0.25, 0.06, 0.02])  # P3-P7
         self.ssi = list(m.stride).index(16) if autobalance else 0  # stride 16 index
         self.BCEcls, self.BCEobj, self.gr, self.hyp, self.autobalance = BCEcls, BCEobj, 1.0, h, autobalance
+        self.BCEcls2 = VarifocalLoss().cuda()
         self.nc = m.nc  # number of classes
         self.nl = m.nl  # number of layers
         self.anchors = m.anchors
@@ -144,23 +158,34 @@ class ComputeLoss:
                 pxy = pxy.sigmoid() * 1.6 - 0.3
                 pwh = (0.2 + pwh.sigmoid() * 4.8) * self.anchors[i]
                 pbox = torch.cat((pxy, pwh), 1)  # predicted box
-                iou = bbox_iou(pbox, tbox[i], CIoU=True).squeeze()  # iou(prediction, target)
-                lbox += (1.0 - iou).mean()  # iou loss
+                torch_iou = bbox_iou(pbox, tbox[i], CIoU=True).squeeze()  # iou(prediction, target)
+                # iou_idx = iou > 0.1
 
                 # Objectness
-                iou = iou.detach().clamp(0).type(tobj.dtype)
+                iou = torch_iou.detach().clamp(0).type(tobj.dtype)
+
+                # Classification
+                metric = iou
+                if self.nc > 1:  # cls loss (only if multiple classes)
+                    cls_score = pcls[range(len(pcls)), tcls[i]]
+                    # metric = iou.pow(6.0) * cls_score.sigmoid().pow(1.0)
+                    metric = (iou.pow(1.0) + cls_score.sigmoid().pow(1.0)) / 2
+
+                    pcls = pcls[metric > 0.05]
+                    t = torch.full_like(pcls, self.cn, device=self.device)  # targets
+                    t[range(len(pcls)), tcls[i][metric > 0.05]] = self.cp
+                    lcls += self.BCEcls(pcls, t)  # BCE
+                    # lcls += self.BCEcls2(pred_score=pcls, gt_score=iou[:, None], label=t).mean()
+                iou_index = metric > 0.05
+
                 if self.sort_obj_iou:
                     j = iou.argsort()
                     b, gj, gi, iou = b[j], gj[j], gi[j], iou[j]
                 if self.gr < 1:
                     iou = (1.0 - self.gr) + self.gr * iou
-                tobj[b, gj, gi] = iou  # iou ratio
+                tobj[b[iou_index], gj[iou_index], gi[iou_index]] = iou[iou_index]  # iou ratio
 
-                # Classification
-                if self.nc > 1:  # cls loss (only if multiple classes)
-                    t = torch.full_like(pcls, self.cn, device=self.device)  # targets
-                    t[range(n), tcls[i]] = self.cp
-                    lcls += self.BCEcls(pcls, t)  # BCE
+                lbox += (1.0 - torch_iou[iou_index]).mean()  # iou loss
 
                 # Append targets to text file
                 # with open('targets.txt', 'a') as file:
@@ -199,14 +224,14 @@ class ComputeLoss:
             device=self.device).float() * g  # offsets
 
         for i in range(self.nl):
-            shape = p[i].shape
+            anchors, shape = self.anchors[i], p[i].shape
             gain[2:6] = torch.tensor(shape)[[3, 2, 3, 2]]  # xyxy gain
 
             # Match targets to anchors
             t = targets * gain  # shape(3,n,7)
             if nt:
                 # Matches
-                r = t[..., 4:6] / self.anchors[i]  # wh ratio
+                r = t[..., 4:6] / anchors  # wh ratio
                 j = torch.max(r, 1 / r).max(1)[0] < self.hyp['anchor_t']  # compare
                 # j = wh_iou(anchors, t[:, 4:6]) > model.hyp['iou_t']  # iou(3,n)=wh_iou(anchors(3,2), gwh(n,2))
                 t = t[j]  # filter
@@ -224,14 +249,14 @@ class ComputeLoss:
                 offsets = 0
 
             # Define
-            bc, gxy, gwh = t.chunk(3, 1)  # (image, class), grid xy, grid wh
-            b, c = bc.long().T  # image, class
+            bc, gxy, gwh = t.chunk(3, 1)  # (image, class), grid xy, grid wh, anchors
+            b, c = bc.long().T  # anchors, image, class
             gij = (gxy - offsets).long()
             gi, gj = gij.T  # grid indices
 
             # Append
-            indices.append((b, gj.clamp_(0, shape[2] - 1), gi.clamp_(0, shape[3] - 1)))  # image, grid_y, grid_x indices
+            indices.append((b, gj.clamp_(0, shape[2] - 1), gi.clamp_(0, shape[3] - 1)))  # image, anchor, grid
             tbox.append(torch.cat((gxy - gij, gwh), 1))  # box
             tcls.append(c)  # class
 
-        return tcls, tbox, 
+        return tcls, tbox, indices
