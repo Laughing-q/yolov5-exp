@@ -280,8 +280,8 @@ class ComputeLoss:
                 # Classification
                 if self.nc > 1:  # cls loss (only if multiple classes)
                     t = torch.full_like(pcls, self.cn, device=self.device)  # targets
-                    target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, 80))
-                    t = F.one_hot(target_labels.long(), 81)[..., :-1]
+                    target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, 0))
+                    t = F.one_hot(target_labels.long(), 80)
                     t = torch.as_tensor(t, dtype=pcls.dtype)
                     # t[target_labels] = self.cp
                     # t[range(len(pcls)), target_labels[fg_mask]] = self.cp
@@ -309,7 +309,7 @@ class ComputeLoss:
         return targets
 
     def bbox_decode(self, pxy, pwh, i, batch_size):
-        pxy = pxy.sigmoid() * 1.6 - 0.3
+        pxy = pxy.sigmoid() * 3 - 1
         pwh = (0.2 + pwh.sigmoid() * 4.8) * self.anchors[i][:, :, None, None]
         pbox = torch.cat((pxy, pwh), 1).view(batch_size, 4, -1)  # bs, 4, num_grids
         pbox = pbox.permute(0, 2, 1).contiguous()
