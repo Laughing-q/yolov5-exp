@@ -40,11 +40,16 @@ def select_candidates_in_gts(xy_centers, gt_bboxes, eps=1e-9):
     xy_centers = xy_centers.unsqueeze(0).repeat(bs * n_max_boxes, 1, 1)
     gt_bboxes_lt = _gt_bboxes[:, 0:2].unsqueeze(1).repeat(1, n_anchors, 1)
     gt_bboxes_rb = _gt_bboxes[:, 2:4].unsqueeze(1).repeat(1, n_anchors, 1)
-    b_lt = xy_centers - gt_bboxes_lt
-    b_rb = gt_bboxes_rb - xy_centers
-    bbox_deltas = torch.cat([b_lt, b_rb], dim=-1)
-    bbox_deltas = bbox_deltas.reshape([bs, n_max_boxes, n_anchors, -1])
-    return (bbox_deltas.min(axis=-1)[0] > eps).to(gt_bboxes.dtype)
+    gt_center = (gt_bboxes_lt + gt_bboxes_rb) / 2
+    dis = xy_centers - gt_center
+    dis = dis.reshape([bs, n_max_boxes, n_anchors, -1])
+    return ((dis.abs() <= 2).all(-1)).to(gt_bboxes.dtype)
+
+    # b_lt = xy_centers - gt_bboxes_lt
+    # b_rb = gt_bboxes_rb - xy_centers
+    # bbox_deltas = torch.cat([b_lt, b_rb], dim=-1)
+    # bbox_deltas = bbox_deltas.reshape([bs, n_max_boxes, n_anchors, -1])
+    # return (bbox_deltas.min(axis=-1)[0] > eps).to(gt_bboxes.dtype)
 
 
 def select_highest_overlaps(mask_pos, overlaps, n_max_boxes):

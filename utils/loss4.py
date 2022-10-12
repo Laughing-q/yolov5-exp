@@ -311,11 +311,18 @@ class ComputeLoss:
         bs = tobj.shape[0]  # batch size
         return (lbox + lobj + lcls) * bs, torch.stack([lbox, lobj, lcls]).detach()
 
-    # def unique(self, metric, gi, gj, w):
-    #     # (n, 9, 2)
-    #     gij = torch.stack((gi, gj), dim=-1)
-    #     # (n, 9)
-    #     gindex = gj * w + gi
+    def unique(self, metric, gi, gj, w, b):
+        for bi in b.unique():
+            # (num_gt, 9)
+            metric = metric[b == bi]
+            gi = gi[b == bi]
+            gj = gj[b == bi]
+            gij = (gj * w + gi).view(-1)
+
+        # (n, 9, 2)
+        # gij = torch.stack((gi, gj), dim=-1)
+        # (n, 9)
+        # gindex = gj * w + gi
 
 
     def build_targets(self, p, targets):
