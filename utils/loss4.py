@@ -290,7 +290,7 @@ class ComputeLoss:
         losses = [torch.cat(x, 1) for x in zip(*assignment)]
 
         # top 3 losses per label
-        metric = losses[0].pow(6.0) + losses[1].pow(1.0)  # n, 27
+        metric = 0.5 * losses[0] + losses[1]  # n, 27
         k = torch.argsort(metric, dim=1)[:, :15]
         ij = torch.zeros_like(losses[0]).bool()  # object loss
         for col in k.T:
