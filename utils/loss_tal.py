@@ -135,7 +135,7 @@ class ComputeLoss:
         self.device = device
 
         self.BCEcls2 = VarifocalLoss()
-        self.assigner = TaskAlignedAssigner(topk=13, num_classes=80, alpha=1.0, beta=6.0)
+        self.assigner = TaskAlignedAssigner(topk=3, num_classes=80, alpha=1.0, beta=6.0)
 
     # def __call__(self, p, targets):  # predictions, targets
     #     lcls = torch.zeros(1, device=self.device)  # class loss
@@ -270,11 +270,11 @@ class ComputeLoss:
                     pred_bboxes.detach(),
                     anchor_points,
                     gt_labels,
-                    gt_bboxes,
+                    xywh2xyxy(gt_bboxes),
                     mask_gt)
             n = fg_mask.sum()
             if n:
-                iou = bbox_iou(torch_bboxes[fg_mask], xyxy2xywh(target_bboxes)[fg_mask], CIoU=True).squeeze()  # iou(prediction, target)
+                iou = bbox_iou(torch_bboxes[fg_mask], target_bboxes[fg_mask], CIoU=True).squeeze()  # iou(prediction, target)
                 lbox += (1.0 - iou).mean()  # iou loss
                 iou = iou.detach().clamp(0).type(tobj.dtype)
                 tobj[fg_mask] = iou
