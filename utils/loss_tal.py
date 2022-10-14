@@ -374,7 +374,7 @@ class ComputeLoss:
         pred_bboxes = self.bbox_decode(anchor_points_s, pred_distri)  # xyxy
 
         target_labels, target_bboxes, target_scores, fg_mask = self.assigner(
-            pred_scores.detach(), pred_bboxes.detach() * stride_tensor, anchor_points, gt_labels, gt_bboxes, mask_gt
+            pred_scores.detach().sigmoid(), pred_bboxes.detach() * stride_tensor, anchor_points, gt_labels, gt_bboxes, mask_gt
         )
 
         # rescale bbox
@@ -395,9 +395,9 @@ class ComputeLoss:
         tobj[fg_mask] = iou.detach().clamp(0).type(tobj.dtype)
         lobj = self.BCEobj(pred_obj, tobj)
 
-        # lbox *= self.hyp["box"]
-        # lobj *= self.hyp["obj"]
-        # lcls *= self.hyp["cls"]
+        lbox *= self.hyp["box"]
+        lobj *= 2.5 #self.hyp["obj"]
+        lcls *= 2 #self.hyp["cls"]
         bs = tobj.shape[0]  # batch size
 
         return (lbox + lobj + lcls) * bs, torch.as_tensor([lbox, lobj, lcls], device=lbox.device).detach()

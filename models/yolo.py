@@ -126,11 +126,11 @@ class V6Detect(nn.Module):
         y = torch.cat([xi.view(b, self.no, -1) for xi in x], dim=-1)
         y = y.permute(0, 2, 1).contiguous()  # (b, grids, 85)
         bbox, conf, cls = y.split((4, 1, self.nc), -1)
-        cls = cls.sigmoid()  # (b, grids, 80)
-        conf = conf.sigmoid()  # (b, grids, 1)
         if self.training:
             return x, conf, cls, bbox
         else:
+            cls = cls.sigmoid()  # (b, grids, 80)
+            conf = conf.sigmoid()  # (b, grids, 1)
             anchor_points, stride_tensor = generate_anchors(x, torch.tensor([8, 16, 32]), 5.0, 0.5, device=x[0].device, is_eval=True)
             final_bboxes = dist2bbox(bbox, anchor_points, box_format="xywh") # (b, grids, 4)
             final_bboxes *= stride_tensor
