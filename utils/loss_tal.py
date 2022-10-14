@@ -238,6 +238,7 @@ class BboxLoss(nn.Module):
         else:
             loss_iou = torch.tensor(0.0).to(pred_dist.device)
             loss_dfl = torch.tensor(0.0).to(pred_dist.device)
+            iou = torch.tensor(0.0).to(pred_dist.device)
 
         return loss_iou, loss_dfl, iou
 
@@ -377,22 +378,23 @@ class ComputeLoss:
             pred_scores.detach().sigmoid(), pred_bboxes.detach() * stride_tensor, anchor_points, gt_labels, gt_bboxes, mask_gt
         )
 
-        # rescale bbox
-        target_bboxes /= stride_tensor
-
-        # cls loss
-        # target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.num_classes))
-        # one_hot_label = F.one_hot(target_labels.long(), self.num_classes + 1)[..., :-1]
-        # loss_cls = self.varifocal_loss(pred_scores, target_scores, one_hot_label)
-        target_scores_sum = target_scores.sum()
-        # loss_cls /= target_scores_sum
-        lcls = self.BCEcls(pred_scores, target_scores)  # BCE
-
-        # bbox loss
-        lbox, loss_dfl, iou = self.bbox_loss(pred_distri, pred_bboxes, anchor_points_s, target_bboxes, target_scores, target_scores_sum, fg_mask)
-
         tobj = torch.zeros_like(pred_obj)
-        tobj[fg_mask] = iou.detach().clamp(0).type(tobj.dtype)
+        if fg_mask.sum() > 1:
+            # rescale bbox
+            target_bboxes /= stride_tensor
+
+            # cls loss
+            # target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.num_classes))
+            # one_hot_label = F.one_hot(target_labels.long(), self.num_classes + 1)[..., :-1]
+            # loss_cls = self.varifocal_loss(pred_scores, target_scores, one_hot_label)
+            target_scores_sum = target_scores.sum()
+            # loss_cls /= target_scores_sum
+            lcls = self.BCEcls(pred_scores, target_scores)  # BCE
+
+            # bbox loss
+            lbox, loss_dfl, iou = self.bbox_loss(pred_distri, pred_bboxes, anchor_points_s, target_bboxes, target_scores, target_scores_sum, fg_mask)
+
+            tobj[fg_mask] = iou.detach().clamp(0).type(tobj.dtype)
         lobj = self.BCEobj(pred_obj, tobj)
 
         lbox *= self.hyp["box"]
