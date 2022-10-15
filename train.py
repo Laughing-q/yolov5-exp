@@ -269,6 +269,10 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         callbacks.run('on_train_epoch_start')
         model.train()
 
+        if epoch == (epochs - opt.close_mosaic):
+            LOGGER.info("----> close mosaic")
+            train_loader.close_mosaic()
+
         # Update image weights (optional, single-GPU only)
         if opt.image_weights:
             cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
@@ -474,6 +478,7 @@ def parse_opt(known=False):
     parser.add_argument('--save-period', type=int, default=-1, help='Save checkpoint every x epochs (disabled if < 1)')
     parser.add_argument('--seed', type=int, default=0, help='Global training seed')
     parser.add_argument('--local_rank', type=int, default=-1, help='Automatic DDP Multi-GPU argument, do not modify')
+    parser.add_argument('--close-mosaic', type=int, default=15, help='Automatic DDP Multi-GPU argument, do not modify')
 
     # Logger arguments
     parser.add_argument('--entity', default=None, help='Entity')
