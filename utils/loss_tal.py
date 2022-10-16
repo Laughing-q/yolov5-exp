@@ -286,8 +286,8 @@ class ComputeLoss:
         self.device = device
 
         self.BCEcls2 = VarifocalLoss()
-        self.assigner = TaskAlignedAssigner(topk=13, num_classes=80, alpha=1.0, beta=6.0)
-        self.bbox_loss = BboxLoss(80, 16, use_dfl=False, iou_type="ciou").cuda()
+        self.assigner = TaskAlignedAssigner(topk=13, num_classes=self.nc, alpha=1.0, beta=6.0)
+        self.bbox_loss = BboxLoss(self.nc, 16, use_dfl=False, iou_type="ciou").cuda()
 
     # def __call__(self, p, targets):
     #     lcls = torch.zeros(1, device=self.device)  # class loss
@@ -358,6 +358,10 @@ class ComputeLoss:
         return dist2bbox(pred_dist, anchor_points)
 
     def __call__(self, p, targets):
+        lcls = torch.zeros(1, device=self.device)  # class loss
+        lbox = torch.zeros(1, device=self.device)  # box loss
+        lobj = torch.zeros(1, device=self.device)  # object loss
+
         feats, pred_obj, pred_scores, pred_distri = p
         anchors, anchor_points, n_anchors_list, stride_tensor = generate_anchors(feats, torch.tensor([8, 16, 32]), 5.0, 0.5, device=feats[0].device)
 
@@ -389,7 +393,8 @@ class ComputeLoss:
             # loss_cls = self.varifocal_loss(pred_scores, target_scores, one_hot_label)
             target_scores_sum = target_scores.sum()
             # loss_cls /= target_scores_sum
-            lcls = self.BCEcls(pred_scores, target_scores)  # BCE
+            if self.nc > 1:
+                lcls = self.BCEcls(pred_scores, target_scores)  # BCE
 
             # bbox loss
             lbox, loss_dfl, iou = self.bbox_loss(pred_distri, pred_bboxes, anchor_points_s, target_bboxes, target_scores, target_scores_sum, fg_mask)
