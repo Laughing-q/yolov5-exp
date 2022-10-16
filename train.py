@@ -204,6 +204,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
                                               rank=LOCAL_RANK,
                                               workers=workers,
                                               image_weights=opt.image_weights,
+                                              close_mosaic=(opt.close_mosaic != 0),
                                               quad=opt.quad,
                                               prefix=colorstr('train: '),
                                               shuffle=True)
@@ -271,7 +272,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
         if epoch == (epochs - opt.close_mosaic):
             LOGGER.info("----> close mosaic")
-            train_loader.close_mosaic()
+            dataset.mosaic = False
 
         # Update image weights (optional, single-GPU only)
         if opt.image_weights:
@@ -285,7 +286,7 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
 
         mloss = torch.zeros(3, device=device)  # mean losses
         if RANK != -1:
-            train_loader.batch_sampler.sampler.set_epoch(epoch)
+            train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
         LOGGER.info(('\n' + '%11s' * 7) % ('Epoch', 'GPU_mem', 'box_loss', 'obj_loss', 'cls_loss', 'Instances', 'Size'))
         if RANK in {-1, 0}:
