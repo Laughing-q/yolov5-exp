@@ -378,7 +378,7 @@ class ComputeLoss:
         anchor_points_s = anchor_points / stride_tensor
         pred_bboxes = self.bbox_decode(anchor_points_s, pred_distri)  # xyxy
 
-        target_labels, target_bboxes, target_scores, fg_mask = self.assigner(
+        target_labels, target_bboxes, target_scores, fg_mask, metric = self.assigner(
             pred_scores.detach().sigmoid(), pred_bboxes.detach() * stride_tensor, anchor_points, gt_labels, gt_bboxes, mask_gt
         )
 
@@ -391,20 +391,23 @@ class ComputeLoss:
             # target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.num_classes))
             # one_hot_label = F.one_hot(target_labels.long(), self.num_classes + 1)[..., :-1]
             # loss_cls = self.varifocal_loss(pred_scores, target_scores, one_hot_label)
-            target_scores_sum = target_scores.sum()
+            # target_scores_sum = target_scores.sum()
             # loss_cls /= target_scores_sum
+
+            target_scores_sum = target_scores.sum()
             if self.nc > 1:
-                lcls = self.BCEcls(pred_scores, target_scores)  # BCE
+                lcls = self.BCEcls(pred_scores[fg_mask], target_scores[fg_mask].to(pred_scores.dtype))  # BCE
 
             # bbox loss
             lbox, loss_dfl, iou = self.bbox_loss(pred_distri, pred_bboxes, anchor_points_s, target_bboxes, target_scores, target_scores_sum, fg_mask)
 
-            tobj[fg_mask] = iou.detach().clamp(0).type(tobj.dtype)
+            # tobj[fg_mask] = iou.detach().clamp(0).type(tobj.dtype)
+            tobj[fg_mask] = metric[fg_mask].detach().clamp(0).type(tobj.dtype)
         lobj = self.BCEobj(pred_obj, tobj)
 
         lbox *= self.hyp["box"]
-        lobj *= 2.5 #self.hyp["obj"]
-        lcls *= 2 #self.hyp["cls"]
+        lobj *= 3 #self.hyp["obj"]
+        lcls *= 0.05 #self.hyp["cls"]
         bs = tobj.shape[0]  # batch size
 
         return (lbox + lobj + lcls) * bs, torch.as_tensor([lbox, lobj, lcls], device=lbox.device).detach()
