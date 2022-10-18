@@ -114,8 +114,22 @@ class V6Detect(nn.Module):
         self.inplace = inplace  # use inplace ops (e.g. slice assignment)
         self.shape = (0, 0)  # initial grid shape
         c2, c3 = 32, max(ch[0], self.no - 4)  # channels
-        self.cv2 = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), Conv(c2, 4, 1, act=False)) for x in ch)
+        # self.cv2 = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), Conv(c2, 4, 1, act=False)) for x in ch)
+        self.cv2 = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), 
+                                               nn.Conv2d(c2, 4, 1)) for x in ch)
         self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), Conv(c3, self.no - 4, 1, act=False)) for x in ch)
+        # self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), 
+        #                                        nn.Conv2d(c3, self.no - 4, 1)) for x in ch)
+
+    # def initialize_biases(self):
+    #     for seq in self.cv2:
+    #         conv = seq[-1]
+    #         b = conv.bias.view(-1, )
+    #         b.data.fill_(1.0)
+    #         conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+    #         w = conv.weight
+    #         w.data.fill_(0.)
+    #         conv.weight = torch.nn.Parameter(w, requires_grad=True)
 
     def forward(self, x):
         b = x[0].shape[0]
@@ -306,9 +320,13 @@ class DetectionModel(BaseModel):
         ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             # a[-1].bn.bias.data[2:4] = -1.38629  # wh = 0.25 + (x - 1.38629).sigmoid() * 3.75
-            a[-1].bn.bias.data[2:4] = -1.60944  # wh = 0.2 + (x - 1.60944).sigmoid() * 4.8
+            # a[-1].bn.bias.data[2:4] = -1.60944  # wh = 0.2 + (x - 1.60944).sigmoid() * 4.8
             b[-1].bn.bias.data[0] = math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
             b[-1].bn.bias.data[1 : m.nc + 1] = ncf  # cls
+            # x = b[-1].bias
+            # x.data[0] += math.log(8 / (640 / s) ** 2)
+            # x.data[1:m.nc + 1] = ncf
+            # b[-1].bias = torch.nn.Parameter(x, requires_grad=True)
 
 
 Model = DetectionModel  # retain YOLOv5 'Model' class for backwards compatibility
