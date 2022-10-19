@@ -362,8 +362,8 @@ class ComputeLoss:
             lbox, loss_dfl, iou = self.bbox_loss(pred_distri, pred_bboxes, anchor_points_s, target_bboxes, target_scores, target_scores_sum, fg_mask)
 
             # tobj[fg_mask] = iou.detach().clamp(0).type(tobj.dtype).squeeze()
-            tobj[fg_mask] = target_scores[fg_mask].detach().clamp(0).type(tobj.dtype).max(1)[0]
-            # tobj[fg_mask] = 1
+            # tobj[fg_mask] = target_scores[fg_mask].detach().clamp(0).type(tobj.dtype).max(1)[0]
+            tobj[fg_mask] = 1
 
             if epoch > 50 and img is not None:
                 import cv2
@@ -384,8 +384,8 @@ class ComputeLoss:
                         exit()
             # cv2.imwrite()
 
-        # lobj = self.BCEobj(pred_obj, tobj)
-        lobj = 0
+        lobj = self.BCEobj(pred_obj, tobj)
+        # lobj = 0
 
         lbox *= self.hyp["box"] * 3
         lobj *= self.hyp["obj"] * 3

@@ -153,15 +153,13 @@ class V6Detect(nn.Module):
         if self.training:
             return x, conf, cls, bbox
         else:
-            cls = cls.sigmoid()  # (b, grids, 80)
-            conf = conf.sigmoid()  # (b, grids, 1)
             anchor_points, stride_tensor = generate_anchors(x, torch.tensor([8, 16, 32]), 5.0, 0.5, device=x[0].device, is_eval=True)
             final_bboxes = dist2bbox(bbox, anchor_points, box_format="xywh") # (b, grids, 4)
             final_bboxes *= stride_tensor
             return (torch.cat([final_bboxes, 
-                               # conf, 
-                               torch.ones((b, final_bboxes.shape[1], 1), device=final_bboxes.device, dtype=final_bboxes.dtype),
-                               cls], axis=-1).permute(0, 2, 1).contiguous(), (x, conf, cls, bbox))
+                               conf.sigmoid(), 
+                               # torch.ones((b, final_bboxes.shape[1], 1), device=final_bboxes.device, dtype=final_bboxes.dtype),
+                               cls.sigmoid()], axis=-1).permute(0, 2, 1).contiguous(), (x, conf, cls, bbox))
 
 
 class Segment(Detect):
