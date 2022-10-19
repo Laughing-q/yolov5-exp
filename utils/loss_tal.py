@@ -365,23 +365,23 @@ class ComputeLoss:
             # tobj[fg_mask] = target_scores[fg_mask].detach().clamp(0).type(tobj.dtype).max(1)[0]
             tobj[fg_mask] = 1
 
-            if epoch > 50 and img is not None:
-                import cv2
-                imgs = img.permute(0, 2, 3, 1).contiguous().numpy()  # b, h, w, 3
-                first, second, third = fg_mask.split((80 * 80, 40 * 40, 20 * 20), -1)
-                first = F.interpolate(first.view(1, first.shape[0], 80, 80).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
-                second = F.interpolate(second.view(1, second.shape[0], 40, 40).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
-                third = F.interpolate(third.view(1, third.shape[0], 20, 20).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
-                print("iou:", iou.detach().clamp(0).type(tobj.dtype))
-                print("pred:", pred_obj.sigmoid())
-                print("pred-pos:", pred_obj.sigmoid()[fg_mask])
-                for i in range(len(imgs)):
-                    img = imgs[i]
-                    fg = first[i] + second[i] + third[i]
-                    img[fg.astype(bool)] = img[fg.astype(bool)] * 0.35 + (np.array((0, 0, 255)) * 0.65)
-                    cv2.imshow('p', img)
-                    if cv2.waitKey(0) == ord('q'):
-                        exit()
+            # if epoch > 50 and img is not None:
+            #     import cv2
+            #     imgs = img.permute(0, 2, 3, 1).contiguous().numpy()  # b, h, w, 3
+            #     first, second, third = fg_mask.split((80 * 80, 40 * 40, 20 * 20), -1)
+            #     first = F.interpolate(first.view(1, first.shape[0], 80, 80).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
+            #     second = F.interpolate(second.view(1, second.shape[0], 40, 40).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
+            #     third = F.interpolate(third.view(1, third.shape[0], 20, 20).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
+            #     print("iou:", iou.detach().clamp(0).type(tobj.dtype))
+            #     print("pred:", pred_obj.sigmoid())
+            #     print("pred-pos:", pred_obj.sigmoid()[fg_mask])
+            #     for i in range(len(imgs)):
+            #         img = imgs[i]
+            #         fg = first[i] + second[i] + third[i]
+            #         img[fg.astype(bool)] = img[fg.astype(bool)] * 0.35 + (np.array((0, 0, 255)) * 0.65)
+            #         cv2.imshow('p', img)
+            #         if cv2.waitKey(0) == ord('q'):
+            #             exit()
             # cv2.imwrite()
 
         lobj = self.BCEobj(pred_obj, tobj)
