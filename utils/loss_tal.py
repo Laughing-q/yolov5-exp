@@ -27,10 +27,9 @@ class VarifocalLoss(nn.Module):
         super().__init__()
 
     def forward(self, pred_score, gt_score, label, alpha=0.75, gamma=2.0):
-        gt_score = gt_score * label
-        weight = alpha * pred_score.pow(gamma) * (1 - label) + gt_score  # * label
+        weight = alpha * pred_score.sigmoid().pow(gamma) * (1 - label) + gt_score * label
         with torch.cuda.amp.autocast(enabled=False):
-            loss = F.binary_cross_entropy_with_logits(pred_score.float(), label.float(), reduction="none") * weight
+            loss = (F.binary_cross_entropy_with_logits(pred_score.float(), gt_score.float(), reduction="none") * weight).sum()
         return loss
 
 
@@ -260,7 +259,7 @@ class ComputeLoss:
     sort_obj_iou = False
 
     # Compute losses
-    def __init__(self, model, autobalance=False):
+    def __init__(self, model, autobalance=False, atss_epochs=0):
         device = next(model.parameters()).device  # get model device
         h = model.hyp  # hyperparameters
 
@@ -287,8 +286,9 @@ class ComputeLoss:
 
         self.assigner = TaskAlignedAssigner(topk=13, num_classes=self.nc, alpha=1.0, beta=6.0)
         self.warmup_assigner = ATSSAssigner(9, num_classes=self.nc)
-        self.bbox_loss = BboxLoss(16, use_dfl=False, iou_type="iou").cuda()
+        self.bbox_loss = BboxLoss(16, use_dfl=False, iou_type="ciou").cuda()
         self.varifocal_loss = VarifocalLoss().cuda()
+        self.atss_epochs = atss_epochs
 
     def preprocess(self, targets, batch_size, scale_tensor):
         targets_list = np.zeros((batch_size, 1, 5)).tolist()
@@ -314,7 +314,7 @@ class ComputeLoss:
         anchors, anchor_points, n_anchors_list, stride_tensor = generate_anchors(feats, torch.tensor([8, 16, 32]), 5.0, 0.5, device=feats[0].device)
 
         gt_bboxes_scale = torch.full((1, 4), 640).type_as(pred_scores)
-        batch_size = pred_scores.shape[0]
+        batch_size, grid_size = pred_scores.shape[:2]
 
         # targets
         targets = self.preprocess(targets, batch_size, gt_bboxes_scale)
@@ -326,7 +326,7 @@ class ComputeLoss:
         anchor_points_s = anchor_points / stride_tensor
         pred_bboxes = self.bbox_decode(anchor_points_s, pred_distri)  # xyxy, (b, h*w, 4)
 
-        if epoch > 50:
+        if epoch < self.atss_epochs:
             target_labels, target_bboxes, target_scores, fg_mask = self.warmup_assigner(
                 anchors, n_anchors_list, gt_labels, gt_bboxes, mask_gt, pred_bboxes.detach() * stride_tensor
             )
@@ -340,6 +340,7 @@ class ComputeLoss:
                 mask_gt,
             )
 
+        pred_obj = pred_obj.view(batch_size, grid_size)
         tobj = torch.zeros_like(pred_obj)
         if fg_mask.sum() > 1:
             # rescale bbox
@@ -347,17 +348,22 @@ class ComputeLoss:
 
             target_scores_sum = target_scores.sum()
             if self.nc > 1:
-                target_labels = F.one_hot(target_labels, self.nc)  # (b, h*w, 80)
-                lcls = self.BCEcls(pred_scores[fg_mask], target_labels[fg_mask].to(pred_scores.dtype))  # BCE
+                # target_labels = F.one_hot(target_labels, self.nc)  # (b, h*w, 80)
+                # lcls = self.BCEcls(pred_scores[fg_mask], target_scores[fg_mask].to(pred_scores.dtype))  # BCE
+                target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.nc))
+                target_labels = F.one_hot(target_labels.long(), self.nc + 1)[..., :-1]
+                # lcls = self.BCEcls(pred_scores, target_scores.to(pred_scores.dtype))  # BCE
 
                 # VFL way
-                # lcls = self.varifocal_loss(pred_scores[fg_mask], target_scores[fg_mask], target_labels[fg_mask]).mean()
+                lcls = self.varifocal_loss(pred_scores, target_scores, target_labels)
+                lcls /= target_scores_sum
 
             # bbox loss
             lbox, loss_dfl, iou = self.bbox_loss(pred_distri, pred_bboxes, anchor_points_s, target_bboxes, target_scores, target_scores_sum, fg_mask)
 
-            # tobj[fg_mask] = iou.detach().clamp(0).type(tobj.dtype)
-            tobj[fg_mask] = target_scores[fg_mask].detach().clamp(0).type(tobj.dtype)
+            # tobj[fg_mask] = iou.detach().clamp(0).type(tobj.dtype).squeeze()
+            tobj[fg_mask] = target_scores[fg_mask].detach().clamp(0).type(tobj.dtype).max(1)[0]
+            # tobj[fg_mask] = 1
 
             if epoch > 50 and img is not None:
                 import cv2
@@ -378,7 +384,8 @@ class ComputeLoss:
                         exit()
             # cv2.imwrite()
 
-        lobj = self.BCEobj(pred_obj, tobj)
+        # lobj = self.BCEobj(pred_obj, tobj)
+        lobj = 0
 
         lbox *= self.hyp["box"] * 3
         lobj *= self.hyp["obj"] * 3

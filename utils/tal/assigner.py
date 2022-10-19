@@ -151,8 +151,8 @@ class TaskAlignedAssigner(nn.Module):
 
         # normalize
         align_metric *= mask_pos
-        pos_align_metrics = align_metric.max(axis=-1, keepdim=True)[0]
-        pos_overlaps = (overlaps * mask_pos).max(axis=-1, keepdim=True)[0]
+        pos_align_metrics = align_metric.max(axis=-1, keepdim=True)[0]  # b, max_num_obj
+        pos_overlaps = (overlaps * mask_pos).max(axis=-1, keepdim=True)[0]  # b, max_num_obj
         norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).max(-2)[0].unsqueeze(-1)
         target_scores = target_scores * norm_align_metric
 

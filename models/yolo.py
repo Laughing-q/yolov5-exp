@@ -117,19 +117,29 @@ class V6Detect(nn.Module):
         # self.cv2 = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), Conv(c2, 4, 1, act=False)) for x in ch)
         self.cv2 = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), 
                                                nn.Conv2d(c2, 4, 1)) for x in ch)
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), Conv(c3, self.no - 4, 1, act=False)) for x in ch)
-        # self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), 
-        #                                        nn.Conv2d(c3, self.no - 4, 1)) for x in ch)
+        # self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), Conv(c3, self.no - 4, 1, act=False)) for x in ch)
+        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), 
+                                               nn.Conv2d(c3, self.no - 4, 1)) for x in ch)
+        self.initialize_biases()
 
-    # def initialize_biases(self):
-    #     for seq in self.cv2:
-    #         conv = seq[-1]
-    #         b = conv.bias.view(-1, )
-    #         b.data.fill_(1.0)
-    #         conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
-    #         w = conv.weight
-    #         w.data.fill_(0.)
-    #         conv.weight = torch.nn.Parameter(w, requires_grad=True)
+    def initialize_biases(self):
+        for seq in self.cv3:
+            conv = seq[-1]
+            b = conv.bias.view(-1, )
+            b.data.fill_(-math.log((1 - 1e-2) / 1e-2))
+            conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+            w = conv.weight
+            w.data.fill_(0.)
+            conv.weight = torch.nn.Parameter(w, requires_grad=True)
+
+        for seq in self.cv2:
+            conv = seq[-1]
+            b = conv.bias.view(-1, )
+            b.data.fill_(1.0)
+            conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+            w = conv.weight
+            w.data.fill_(0.)
+            conv.weight = torch.nn.Parameter(w, requires_grad=True)
 
     def forward(self, x):
         b = x[0].shape[0]
@@ -148,7 +158,10 @@ class V6Detect(nn.Module):
             anchor_points, stride_tensor = generate_anchors(x, torch.tensor([8, 16, 32]), 5.0, 0.5, device=x[0].device, is_eval=True)
             final_bboxes = dist2bbox(bbox, anchor_points, box_format="xywh") # (b, grids, 4)
             final_bboxes *= stride_tensor
-            return (torch.cat([final_bboxes, conf, cls], axis=-1).permute(0, 2, 1).contiguous(), (x, conf, cls, bbox))
+            return (torch.cat([final_bboxes, 
+                               # conf, 
+                               torch.ones((b, final_bboxes.shape[1], 1), device=final_bboxes.device, dtype=final_bboxes.dtype),
+                               cls], axis=-1).permute(0, 2, 1).contiguous(), (x, conf, cls, bbox))
 
 
 class Segment(Detect):
@@ -259,7 +272,8 @@ class DetectionModel(BaseModel):
             check_anchor_order(m)
             m.anchors /= m.stride.view(-1, 1, 1)
             self.stride = m.stride
-            self._initialize_biases()  # only run once
+            if not isinstance(m, V6Detect):
+                self._initialize_biases()  # only run once
 
         # Init weights, biases
         initialize_weights(self)
@@ -319,8 +333,8 @@ class DetectionModel(BaseModel):
         m = self.model[-1]  # Detect() module
         ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
-            # a[-1].bn.bias.data[2:4] = -1.38629  # wh = 0.25 + (x - 1.38629).sigmoid() * 3.75
-            # a[-1].bn.bias.data[2:4] = -1.60944  # wh = 0.2 + (x - 1.60944).sigmoid() * 4.8
+            a[-1].bn.bias.data[2:4] = -1.38629  # wh = 0.25 + (x - 1.38629).sigmoid() * 3.75
+            a[-1].bn.bias.data[2:4] = -1.60944  # wh = 0.2 + (x - 1.60944).sigmoid() * 4.8
             b[-1].bn.bias.data[0] = math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
             b[-1].bn.bias.data[1 : m.nc + 1] = ncf  # cls
             # x = b[-1].bias
