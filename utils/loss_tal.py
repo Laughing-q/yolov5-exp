@@ -8,6 +8,7 @@ import math
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import cv2
 
 from utils.metrics import bbox_iou
 from utils.torch_utils import de_parallel
@@ -259,7 +260,7 @@ class ComputeLoss:
     sort_obj_iou = False
 
     # Compute losses
-    def __init__(self, model, autobalance=False, atss_epochs=0):
+    def __init__(self, model, autobalance=False, atss_epochs=0, use_dfl=False):
         device = next(model.parameters()).device  # get model device
         h = model.hyp  # hyperparameters
 
@@ -289,6 +290,9 @@ class ComputeLoss:
         self.bbox_loss = BboxLoss(16, use_dfl=False, iou_type="ciou").cuda()
         self.varifocal_loss = VarifocalLoss().cuda()
         self.atss_epochs = atss_epochs
+        self.reg_max = 16 if use_dfl else 0
+        self.use_dfl = use_dfl
+        self.proj = nn.Parameter(torch.linspace(0, self.reg_max, self.reg_max + 1), requires_grad=False)
 
     def preprocess(self, targets, batch_size, scale_tensor):
         targets_list = np.zeros((batch_size, 1, 5)).tolist()
@@ -303,12 +307,16 @@ class ComputeLoss:
         return targets
 
     def bbox_decode(self, anchor_points, pred_dist):
+        if self.use_dfl:
+            batch_size, n_anchors, _ = pred_dist.shape
+            pred_dist = F.softmax(pred_dist.view(batch_size, n_anchors, 4, self.reg_max + 1), dim=-1).matmul(self.proj.to(pred_dist.device))
         return dist2bbox(pred_dist, anchor_points, box_format="xyxy")
 
     def __call__(self, p, targets, img=None, epoch=0):
         lcls = torch.zeros(1, device=self.device)  # class loss
         lbox = torch.zeros(1, device=self.device)  # box loss
         lobj = torch.zeros(1, device=self.device)  # object loss
+        ldfl = torch.zeros(1, device=self.device)  # object loss
 
         feats, pred_obj, pred_scores, pred_distri = p
         anchors, anchor_points, n_anchors_list, stride_tensor = generate_anchors(feats, torch.tensor([8, 16, 32]), 5.0, 0.5, device=feats[0].device)
@@ -346,42 +354,25 @@ class ComputeLoss:
         target_bboxes /= stride_tensor
 
         target_scores_sum = target_scores.sum()
-        if self.nc > 1:
-            # target_labels = F.one_hot(target_labels, self.nc)  # (b, h*w, 80)
-            # lcls = self.BCEcls(pred_scores[fg_mask], target_scores[fg_mask].to(pred_scores.dtype))  # BCE
-            target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.nc))
-            target_labels = F.one_hot(target_labels.long(), self.nc + 1)[..., :-1]
-            # lcls = self.BCEcls(pred_scores, target_scores.to(pred_scores.dtype))  # BCE
 
-            # VFL way
-            lcls = self.varifocal_loss(pred_scores, target_scores, target_labels)
-            lcls /= target_scores_sum
+        # cls loss
+        # target_labels = F.one_hot(target_labels, self.nc)  # (b, h*w, 80)
+        # lcls = self.BCEcls(pred_scores[fg_mask], target_scores[fg_mask].to(pred_scores.dtype))  # BCE
+        target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.nc))
+        target_labels = F.one_hot(target_labels.long(), self.nc + 1)[..., :-1]
+        # lcls = self.BCEcls(pred_scores, target_scores.to(pred_scores.dtype))  # BCE
+
+        # VFL way
+        lcls = self.varifocal_loss(pred_scores, target_scores, target_labels)
+        lcls /= target_scores_sum
 
         # bbox loss
-        lbox, loss_dfl, iou = self.bbox_loss(pred_distri, pred_bboxes, anchor_points_s, target_bboxes, target_scores, target_scores_sum, fg_mask)
+        lbox, ldfl, iou = self.bbox_loss(pred_distri, pred_bboxes, anchor_points_s, target_bboxes, target_scores, target_scores_sum, fg_mask)
 
+        # obj loss
         # tobj[fg_mask] = iou.detach().clamp(0).type(tobj.dtype).squeeze()
         # tobj[fg_mask] = target_scores[fg_mask].detach().clamp(0).type(tobj.dtype).max(1)[0]
         tobj[fg_mask] = 1
-
-        # if epoch > 50 and img is not None:
-        #     import cv2
-        #     imgs = img.permute(0, 2, 3, 1).contiguous().numpy()  # b, h, w, 3
-        #     first, second, third = fg_mask.split((80 * 80, 40 * 40, 20 * 20), -1)
-        #     first = F.interpolate(first.view(1, first.shape[0], 80, 80).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
-        #     second = F.interpolate(second.view(1, second.shape[0], 40, 40).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
-        #     third = F.interpolate(third.view(1, third.shape[0], 20, 20).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
-        #     print("iou:", iou.detach().clamp(0).type(tobj.dtype))
-        #     print("pred:", pred_obj.sigmoid())
-        #     print("pred-pos:", pred_obj.sigmoid()[fg_mask])
-        #     for i in range(len(imgs)):
-        #         img = imgs[i]
-        #         fg = first[i] + second[i] + third[i]
-        #         img[fg.astype(bool)] = img[fg.astype(bool)] * 0.35 + (np.array((0, 0, 255)) * 0.65)
-        #         cv2.imshow('p', img)
-        #         if cv2.waitKey(0) == ord('q'):
-        #             exit()
-        # cv2.imwrite()
 
         lobj = self.BCEobj(pred_obj, tobj)
         # lobj = 0
@@ -389,6 +380,24 @@ class ComputeLoss:
         lbox *= self.hyp["box"] * 3
         lobj *= self.hyp["obj"] * 3
         lcls *= self.hyp["cls"] * 3
+        ldfl *= 0.5 * 3
         bs = tobj.shape[0]  # batch size
 
         return (lbox + lobj + lcls) * bs, torch.as_tensor([lbox, lobj, lcls], device=lbox.device).detach()
+
+    def vis_assignments(self, fg_mask, imgs):
+        imgs = img.permute(0, 2, 3, 1).contiguous().numpy()  # b, h, w, 3
+        first, second, third = fg_mask.split((80 * 80, 40 * 40, 20 * 20), -1)
+        first = F.interpolate(first.view(1, first.shape[0], 80, 80).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
+        second = F.interpolate(second.view(1, second.shape[0], 40, 40).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
+        third = F.interpolate(third.view(1, third.shape[0], 20, 20).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
+        # print("iou:", iou.detach().clamp(0).type(tobj.dtype))
+        # print("pred:", pred_obj.sigmoid())
+        # print("pred-pos:", pred_obj.sigmoid()[fg_mask])
+        for i in range(len(imgs)):
+            img = imgs[i]
+            fg = first[i] + second[i] + third[i]
+            img[fg.astype(bool)] = img[fg.astype(bool)] * 0.35 + (np.array((0, 0, 255)) * 0.65)
+            cv2.imshow('p', img)
+            if cv2.waitKey(0) == ord('q'):
+                exit()
