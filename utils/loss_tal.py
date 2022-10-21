@@ -210,35 +210,26 @@ class BboxLoss(nn.Module):
         self.use_dfl = use_dfl
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
+        # iou loss
+        bbox_mask = fg_mask.unsqueeze(-1).repeat([1, 1, 4])  # (b, h*w, 4)
+        pred_bboxes_pos = torch.masked_select(pred_bboxes, bbox_mask).reshape([-1, 4])
+        target_bboxes_pos = torch.masked_select(target_bboxes, bbox_mask).reshape([-1, 4])
+        bbox_weight = torch.masked_select(target_scores.sum(-1), fg_mask).unsqueeze(-1)
+        loss_iou, iou = self.iou_loss(pred_bboxes_pos, target_bboxes_pos)
+        loss_iou *= bbox_weight
+        loss_iou = loss_iou.sum() / target_scores_sum
+        # loss_iou = loss_iou.mean()
 
-        # select positive samples mask
-        num_pos = fg_mask.sum()
-        if num_pos > 0:
-            # iou loss
-            bbox_mask = fg_mask.unsqueeze(-1).repeat([1, 1, 4])  # (b, h*w, 4)
-            pred_bboxes_pos = torch.masked_select(pred_bboxes, bbox_mask).reshape([-1, 4])
-            target_bboxes_pos = torch.masked_select(target_bboxes, bbox_mask).reshape([-1, 4])
-            bbox_weight = torch.masked_select(target_scores.sum(-1), fg_mask).unsqueeze(-1)
-            loss_iou, iou = self.iou_loss(pred_bboxes_pos, target_bboxes_pos)
-            loss_iou *= bbox_weight
-            loss_iou = loss_iou.sum() / target_scores_sum
-            # loss_iou = loss_iou.mean()
-
-            # dfl loss
-            if self.use_dfl:
-                dist_mask = fg_mask.unsqueeze(-1).repeat([1, 1, (self.reg_max + 1) * 4])
-                pred_dist_pos = torch.masked_select(pred_dist, dist_mask).reshape([-1, 4, self.reg_max + 1])
-                target_ltrb = bbox2dist(anchor_points, target_bboxes, self.reg_max)
-                target_ltrb_pos = torch.masked_select(target_ltrb, bbox_mask).reshape([-1, 4])
-                loss_dfl = self._df_loss(pred_dist_pos, target_ltrb_pos) * bbox_weight
-                loss_dfl = loss_dfl.sum() / target_scores_sum
-            else:
-                loss_dfl = torch.tensor(0.0).to(pred_dist.device)
-
+        # dfl loss
+        if self.use_dfl:
+            dist_mask = fg_mask.unsqueeze(-1).repeat([1, 1, (self.reg_max + 1) * 4])
+            pred_dist_pos = torch.masked_select(pred_dist, dist_mask).reshape([-1, 4, self.reg_max + 1])
+            target_ltrb = bbox2dist(anchor_points, target_bboxes, self.reg_max)
+            target_ltrb_pos = torch.masked_select(target_ltrb, bbox_mask).reshape([-1, 4])
+            loss_dfl = self._df_loss(pred_dist_pos, target_ltrb_pos) * bbox_weight
+            loss_dfl = loss_dfl.sum() / target_scores_sum
         else:
-            loss_iou = torch.tensor(0.0).to(pred_dist.device)
             loss_dfl = torch.tensor(0.0).to(pred_dist.device)
-            iou = torch.tensor(0.0).to(pred_dist.device)
 
         return loss_iou, loss_dfl, iou
 
@@ -287,7 +278,7 @@ class ComputeLoss:
 
         self.assigner = TaskAlignedAssigner(topk=13, num_classes=self.nc, alpha=1.0, beta=6.0)
         self.warmup_assigner = ATSSAssigner(9, num_classes=self.nc)
-        self.bbox_loss = BboxLoss(16, use_dfl=False, iou_type="ciou").cuda()
+        self.bbox_loss = BboxLoss(16, use_dfl=use_dfl, iou_type="ciou").cuda()
         self.varifocal_loss = VarifocalLoss().cuda()
         self.atss_epochs = atss_epochs
         self.reg_max = 16 if use_dfl else 0
@@ -309,7 +300,8 @@ class ComputeLoss:
     def bbox_decode(self, anchor_points, pred_dist):
         if self.use_dfl:
             batch_size, n_anchors, _ = pred_dist.shape
-            pred_dist = F.softmax(pred_dist.view(batch_size, n_anchors, 4, self.reg_max + 1), dim=-1).matmul(self.proj.to(pred_dist.device))
+            pred_dist = F.softmax(pred_dist.view(batch_size, n_anchors, 4, self.reg_max + 1), dim=-1)\
+                                .matmul(self.proj.to(pred_dist.device).to(pred_dist.dtype))
         return dist2bbox(pred_dist, anchor_points, box_format="xyxy")
 
     def __call__(self, p, targets, img=None, epoch=0):
@@ -366,16 +358,25 @@ class ComputeLoss:
         lcls = self.varifocal_loss(pred_scores, target_scores, target_labels)
         lcls /= target_scores_sum
 
-        # bbox loss
-        lbox, ldfl, iou = self.bbox_loss(pred_distri, pred_bboxes, anchor_points_s, target_bboxes, target_scores, target_scores_sum, fg_mask)
+        num_pos = fg_mask.sum()
 
-        # obj loss
-        # tobj[fg_mask] = iou.detach().clamp(0).type(tobj.dtype).squeeze()
-        # tobj[fg_mask] = target_scores[fg_mask].detach().clamp(0).type(tobj.dtype).max(1)[0]
-        tobj[fg_mask] = 1
+        if num_pos:
+            # bbox loss
+            lbox, ldfl, iou = self.bbox_loss(pred_distri, 
+                                             pred_bboxes, 
+                                             anchor_points_s, 
+                                             target_bboxes, 
+                                             target_scores, 
+                                             target_scores_sum,
+                                             fg_mask)
 
-        lobj = self.BCEobj(pred_obj, tobj)
-        # lobj = 0
+            # obj loss
+            # tobj[fg_mask] = iou.detach().clamp(0).type(tobj.dtype).squeeze()
+            # tobj[fg_mask] = target_scores[fg_mask].detach().clamp(0).type(tobj.dtype).max(1)[0]
+            tobj[fg_mask] = 1
+
+            lobj = self.BCEobj(pred_obj, tobj)
+            # lobj = 0
 
         lbox *= self.hyp["box"] * 3
         lobj *= self.hyp["obj"] * 3
@@ -383,7 +384,7 @@ class ComputeLoss:
         ldfl *= 0.5 * 3
         bs = tobj.shape[0]  # batch size
 
-        return (lbox + lobj + lcls) * bs, torch.as_tensor([lbox, lobj, lcls], device=lbox.device).detach()
+        return (lbox + lobj + lcls + ldfl) * bs, torch.as_tensor([lbox, ldfl, lcls], device=lbox.device).detach()
 
     def vis_assignments(self, fg_mask, imgs):
         imgs = img.permute(0, 2, 3, 1).contiguous().numpy()  # b, h, w, 3
@@ -398,6 +399,6 @@ class ComputeLoss:
             img = imgs[i]
             fg = first[i] + second[i] + third[i]
             img[fg.astype(bool)] = img[fg.astype(bool)] * 0.35 + (np.array((0, 0, 255)) * 0.65)
-            cv2.imshow('p', img)
-            if cv2.waitKey(0) == ord('q'):
+            cv2.imshow("p", img)
+            if cv2.waitKey(0) == ord("q"):
                 exit()

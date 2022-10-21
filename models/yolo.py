@@ -105,7 +105,6 @@ class V6Detect(nn.Module):
     def __init__(self, nc=80, anchors=(), use_dfl=False, ch=(), inplace=True):  # detection layer
         super().__init__()
         self.nc = nc  # number of classes
-        self.no = nc + 5  # number of outputs per anchor
         self.nl = len(anchors)  # number of detection layers
         self.grid = torch.empty(0)  # init
         self.anchor_grid = torch.empty(0)  # init
@@ -113,18 +112,19 @@ class V6Detect(nn.Module):
         self.register_buffer("anchors", torch.tensor(anchors).float().view(self.nl, -1, 2))  # shape(nl,na,2)
         self.inplace = inplace  # use inplace ops (e.g. slice assignment)
         self.shape = (0, 0)  # initial grid shape
-        c2, c3 = 32, max(ch[0], self.no - 4)  # channels
 
         self.reg_max = 16 if use_dfl else 0
+        self.no = nc + (self.reg_max + 1) * 4 + 1  # number of outputs per anchor
+        c2, c3 = 32, max(ch[0], self.no - 4)  # channels
         self.use_dfl = use_dfl
         # self.cv2 = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), Conv(c2, 4, 1, act=False)) for x in ch)
         self.cv2 = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), 
                                                nn.Conv2d(c2, 4 * (self.reg_max + 1), 1)) for x in ch)
         # self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), Conv(c3, self.no - 4, 1, act=False)) for x in ch)
         self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), 
-                                               nn.Conv2d(c3, self.no - 4, 1)) for x in ch)
-        self.initialize_biases()
+                                               nn.Conv2d(c3, self.nc + 1, 1)) for x in ch)
         self.proj_conv = nn.Conv2d(self.reg_max + 1, 1, 1, bias=False)
+        self.initialize_biases()
 
     def initialize_biases(self):
         for seq in self.cv3:
@@ -156,18 +156,18 @@ class V6Detect(nn.Module):
 
         y = torch.cat([xi.view(b, self.no, -1) for xi in x], dim=-1)
         y = y.permute(0, 2, 1).contiguous()  # (b, grids, 85)
-        bbox, conf, cls = y.split((4, 1, self.nc), -1)
+        bbox, conf, cls = y.split(((self.reg_max + 1) * 4, 1, self.nc), -1)
         if self.training:
             return x, conf, cls, bbox
         else:
             anchor_points, stride_tensor = generate_anchors(x, torch.tensor([8, 16, 32]), 5.0, 0.5, device=x[0].device, is_eval=True)
 
             if self.use_dfl:
-                bbox = bbox.reshape([b, -1, 4, self.reg_max + 1]).permute(0, 3, 2, 1)  # b, reg_max+1, 4, grids
-                bbox = self.proj_conv(F.softmax(bbox, dim=1)).view(b, 4, -1)  # b, 4, grids
-                bbox = bbox.permute(0, 2, 1).contiguous()  # b, grids, 4
+                dfl_bbox = bbox.reshape([b, -1, 4, self.reg_max + 1]).permute(0, 3, 2, 1)  # b, reg_max+1, 4, grids
+                dfl_bbox = self.proj_conv(F.softmax(dfl_bbox, dim=1)).view(b, 4, -1)  # b, 4, grids
+                dfl_bbox = dfl_bbox.permute(0, 2, 1).contiguous()  # b, grids, 4
 
-            final_bboxes = dist2bbox(bbox, anchor_points, box_format="xywh") # (b, grids, 4)
+            final_bboxes = dist2bbox(dfl_bbox, anchor_points, box_format="xywh") # (b, grids, 4)
             final_bboxes *= stride_tensor
             return (torch.cat([final_bboxes, 
                                conf.sigmoid(), 
