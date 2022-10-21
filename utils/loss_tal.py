@@ -378,9 +378,10 @@ class ComputeLoss:
             lobj = self.BCEobj(pred_obj, tobj)
             # lobj = 0
 
-        lbox *= self.hyp["box"] * 3
-        lobj *= self.hyp["obj"] * 3
-        lcls *= self.hyp["cls"] * 3
+        # lbox *= self.hyp["box"] * 3
+        lbox *= 2.5 * 3
+        lobj *= 0.7 * 3
+        lcls *= 1.0 * 3
         ldfl *= 0.5 * 3
         bs = tobj.shape[0]  # batch size
 
