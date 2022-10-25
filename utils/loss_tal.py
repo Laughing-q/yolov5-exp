@@ -352,11 +352,11 @@ class ComputeLoss:
         # lcls = self.BCEcls(pred_scores[fg_mask], target_scores[fg_mask].to(pred_scores.dtype))  # BCE
         # target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.nc))
         # target_labels = F.one_hot(target_labels.long(), self.nc + 1)[..., :-1]
-        lcls = self.BCEcls(pred_scores, target_scores.to(pred_scores.dtype)).sum()  # BCE
+        lcls = self.BCEcls(pred_scores, target_scores.to(pred_scores.dtype)).mean()  # BCE
 
         # VFL way
         # lcls = self.varifocal_loss(pred_scores, target_scores, target_labels)
-        lcls /= target_scores_sum
+        # lcls /= target_scores_sum
 
         num_pos = fg_mask.sum()
 
@@ -380,10 +380,10 @@ class ComputeLoss:
             # lobj = 0
 
         # lbox *= self.hyp["box"] * 3
-        lbox *= 2.5 * 3
+        lbox *= 0.05 * 3
         lobj *= 0.7 * 3
         lcls *= 1.0 * 3
-        ldfl *= 0.5 * 3
+        ldfl *= 0.05 * 3
         bs = tobj.shape[0]  # batch size
 
         return (lbox + lobj + lcls + ldfl) * bs, torch.as_tensor([lbox, ldfl, lcls], device=lbox.device).detach()
