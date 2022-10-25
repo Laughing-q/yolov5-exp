@@ -382,7 +382,7 @@ class ComputeLoss:
         # lbox *= self.hyp["box"] * 3
         lbox *= 2.5 * 3
         lobj *= 0.7 * 3
-        lcls *= 1.0 * 3
+        lcls *= 0.1 * 3
         ldfl *= 0.5 * 3
         bs = tobj.shape[0]  # batch size
 
