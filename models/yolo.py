@@ -174,6 +174,79 @@ class V6Detect(nn.Module):
                                # torch.ones((b, final_bboxes.shape[1], 1), device=final_bboxes.device, dtype=final_bboxes.dtype),
                                cls.sigmoid()], axis=-1).permute(0, 2, 1).contiguous(), (x, conf, cls, bbox))
 
+class V6DetectDFL(nn.Module):
+    # YOLOv5 Detect head for detection models
+    stride = None  # strides computed during build
+    dynamic = False  # force grid reconstruction
+    export = False  # export mode
+
+    def __init__(self, nc=80, anchors=(), use_dfl=False, ch=(), inplace=True):  # detection layer
+        super().__init__()
+        self.nc = nc  # number of classes
+        self.nl = len(anchors)  # number of detection layers
+        self.grid = torch.empty(0)  # init
+        self.anchor_grid = torch.empty(0)  # init
+        self.stride_grid = torch.empty(0)  # init
+        self.register_buffer("anchors", torch.tensor(anchors).float().view(self.nl, -1, 2))  # shape(nl,na,2)
+        self.inplace = inplace  # use inplace ops (e.g. slice assignment)
+        self.shape = (0, 0)  # initial grid shape
+
+        self.reg_max = 16 if use_dfl else 0
+        self.no = nc + (self.reg_max + 1) * 4 + 1  # number of outputs per anchor
+        c2, c3 = 32, max(ch[0], self.no - 4)  # channels
+        self.use_dfl = use_dfl
+        # self.cv2 = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), Conv(c2, 4, 1, act=False)) for x in ch)
+        self.cv2 = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), 
+                                               nn.Conv2d(c2, 4 * (self.reg_max + 1), 1)) for x in ch)
+        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), Conv(c3, self.nc + 1, 1, act=False)) for x in ch)
+        # self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), 
+        #                                        nn.Conv2d(c3, self.nc + 1, 1)) for x in ch)
+        self.proj_conv = nn.Conv2d(self.reg_max + 1, 1, 1, bias=False)
+        self.initialize_biases()
+
+    def initialize_biases(self):
+        ncf = math.log(0.6 / (self.nc - 0.999999))
+        stride = [8.0, 16.0, 32.0]
+        for i, seq in enumerate(self.cv3):
+            seq[-1].bn.bias.data[0] = math.log(8 / (640 / stride[i]) ** 2)  # obj (8 objects per 640 image)
+            seq[-1].bn.bias.data[1 : self.nc + 1] = ncf  # cls
+
+        for seq in self.cv2:
+            conv = seq[-1]
+            b = conv.bias.view(-1, )
+            b.data.fill_(1.0)
+            conv.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+            w = conv.weight
+            w.data.fill_(0.)
+            conv.weight = torch.nn.Parameter(w, requires_grad=True)
+        self.proj = nn.Parameter(torch.linspace(0, self.reg_max, self.reg_max + 1), requires_grad=False)
+        self.proj_conv.weight = nn.Parameter(self.proj.view([1, self.reg_max + 1, 1, 1]).clone().detach(),
+                                                   requires_grad=False)
+
+    def forward(self, x):
+        b = x[0].shape[0]
+        for i in range(self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+        if self.training:
+            return x
+
+        y = torch.cat([xi.view(b, self.no, -1) for xi in x], dim=-1)
+        y = y.permute(0, 2, 1).contiguous()  # (b, grids, 85)
+        bbox, conf, cls = y.split(((self.reg_max + 1) * 4, 1, self.nc), -1)
+        anchor_points, stride_tensor = generate_anchors(x, torch.tensor([8, 16, 32]), 5.0, 0.5, device=x[0].device, is_eval=True)
+
+        if self.use_dfl:
+            dfl_bbox = bbox.reshape([b, -1, 4, self.reg_max + 1]).permute(0, 3, 2, 1)  # b, reg_max+1, 4, grids
+            dfl_bbox = self.proj_conv(F.softmax(dfl_bbox, dim=1)).view(b, 4, -1)  # b, 4, grids
+            bbox = dfl_bbox.permute(0, 2, 1).contiguous()  # b, grids, 4
+
+        final_bboxes = dist2bbox(bbox, anchor_points, box_format="xywh") # (b, grids, 4)
+        final_bboxes *= stride_tensor
+        return (torch.cat([final_bboxes, 
+                           conf.sigmoid(), 
+                           # torch.ones((b, final_bboxes.shape[1], 1), device=final_bboxes.device, dtype=final_bboxes.dtype),
+                           cls.sigmoid()], axis=-1).permute(0, 2, 1).contiguous(), x)
+
 
 class Segment(Detect):
     # YOLOv5 Segment head for segmentation models
@@ -240,7 +313,7 @@ class BaseModel(nn.Module):
         # Apply to(), cpu(), cuda(), half() to model tensors that are not parameters or registered buffers
         self = super()._apply(fn)
         m = self.model[-1]  # Detect()
-        if isinstance(m, (Detect, Segment, V6Detect)):
+        if isinstance(m, (Detect, Segment, V6Detect, V6DetectDFL)):
             m.stride = fn(m.stride)
             m.grid = list(map(fn, m.grid))
             if isinstance(m.anchor_grid, list):
@@ -275,7 +348,7 @@ class DetectionModel(BaseModel):
 
         # Build strides, anchors
         m = self.model[-1]  # Detect()
-        if isinstance(m, (Detect, Segment, V6Detect)):
+        if isinstance(m, (Detect, Segment, V6Detect, V6DetectDFL)):
             s = 256  # 2x min stride
             m.inplace = self.inplace
             forward = lambda x: self.forward(x)[0] if isinstance(m, (Segment, V6Detect)) else self.forward(x)
@@ -283,7 +356,7 @@ class DetectionModel(BaseModel):
             check_anchor_order(m)
             m.anchors /= m.stride.view(-1, 1, 1)
             self.stride = m.stride
-            if not isinstance(m, V6Detect):
+            if not (isinstance(m, V6Detect) or isinstance(m, V6DetectDFL)):
                 self._initialize_biases()  # only run once
 
         # Init weights, biases
@@ -344,7 +417,7 @@ class DetectionModel(BaseModel):
         m = self.model[-1]  # Detect() module
         ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
-            a[-1].bn.bias.data[2:4] = -1.38629  # wh = 0.25 + (x - 1.38629).sigmoid() * 3.75
+            # a[-1].bn.bias.data[2:4] = -1.38629  # wh = 0.25 + (x - 1.38629).sigmoid() * 3.75
             a[-1].bn.bias.data[2:4] = -1.60944  # wh = 0.2 + (x - 1.60944).sigmoid() * 4.8
             b[-1].bn.bias.data[0] = math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
             b[-1].bn.bias.data[1 : m.nc + 1] = ncf  # cls
@@ -445,7 +518,7 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
         # TODO: channel, gw, gd
-        elif m in {Detect, Segment, V6Detect}:
+        elif m in {Detect, Segment, V6Detect, V6DetectDFL}:
             args.append([ch[x] for x in f])
             if isinstance(args[1], int):  # number of anchors
                 args[1] = [list(range(args[1] * 2))] * len(f)

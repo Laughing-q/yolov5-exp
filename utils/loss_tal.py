@@ -14,7 +14,7 @@ from utils.metrics import bbox_iou
 from utils.torch_utils import de_parallel
 from utils.tal.assigner import TaskAlignedAssigner, ATSSAssigner
 from utils.tal.anchor_generator import dist2bbox, generate_anchors, bbox2dist
-from utils.general import xywh2xyxy
+from utils.general import xywh2xyxy, xyxy2xywh
 
 
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441

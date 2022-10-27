@@ -1,6 +1,6 @@
 import torch
 
-def generate_anchors(feats, fpn_strides, grid_cell_size=5.0, grid_cell_offset=0.5,  device='cpu', is_eval=False):
+def generate_anchors(feats, fpn_strides, grid_cell_size=5.0, grid_cell_offset=0.5, device='cpu', is_eval=False):
     '''Generate anchors from features.'''
     anchors = []
     anchor_points = []
