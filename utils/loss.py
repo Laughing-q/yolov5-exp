@@ -220,7 +220,7 @@ class ComputeLoss:
                 t = t.repeat((5, 1, 1))[j]
                 offsets = (torch.zeros_like(gxy)[None] + off[:, None])[j]
             else:
-                t = targets[0]
+                t = torch.zeros((0, 6), device=targets.device)
                 offsets = 0
 
             # Define
