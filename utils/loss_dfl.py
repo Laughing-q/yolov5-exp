@@ -6,12 +6,13 @@ Loss functions
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+import cv2
 
 from utils.metrics import bbox_iou
 from utils.torch_utils import de_parallel
 from utils.general import xywh2xyxy
 from .tal.anchor_generator import generate_anchors, dist2bbox, bbox2dist
-from .loss_tal import IOUloss
 
 
 def smooth_BCE(eps=0.1):  # https://github.com/ultralytics/yolov3/issues/238#issuecomment-598028441
@@ -125,7 +126,7 @@ class ComputeLoss:
         self.use_dfl = use_dfl
         self.proj = nn.Parameter(torch.linspace(0, self.reg_max, self.reg_max + 1), requires_grad=False)
 
-    def __call__(self, p, targets):  # predictions, targets
+    def __call__(self, p, targets, imgs=None):  # predictions, targets
         lcls = torch.zeros(1, device=self.device)  # class loss
         lbox = torch.zeros(1, device=self.device)  # box loss
         lobj = torch.zeros(1, device=self.device)  # object loss
@@ -134,10 +135,10 @@ class ComputeLoss:
 
         # Losses
         fs = [pi.shape[2:4] for pi in p]
-        _, anchor_points,_, stride_tensor = generate_anchors(p, torch.tensor([8, 16, 32]), 5.0, 0.5, device=p[0].device, is_eval=False)
-        # anchor_points, _ = generate_anchors(p, torch.tensor([8, 16, 32]), 5.0, 0.5, device=p[0].device, is_eval=True)
-        anchor_points = anchor_points / stride_tensor
+        anchor_points, _ = generate_anchors(p, torch.tensor([8, 16, 32]), 5.0, 0.5, device=p[0].device, is_eval=True)
+        # anchor_points = anchor_points / stride_tensor
         anchor_points = anchor_points.split((fs[0][0] * fs[0][1], fs[1][0] * fs[1][1], fs[2][0] * fs[2][1]), 0)
+        strides = [8, 16, 32]
         for i, pi in enumerate(p):  # layer index, layer predictions
             b, gj, gi = indices[i]  # image, anchor, gridy, gridx
             tobj = torch.zeros((pi.shape[0], pi.shape[2], pi.shape[3]), dtype=pi.dtype,
@@ -153,6 +154,11 @@ class ComputeLoss:
                 iou = bbox_iou(pbox, tbox[i], CIoU=True).squeeze()  # iou(prediction, target)
                 lbox += (1.0 - iou).mean()  # iou loss
 
+                # vis
+                # if imgs is not None:
+                #     tdist = bbox2dist(an_p, xywh2xyxy(tbox[i]), self.reg_max)
+                #     self.vis_assignments(imgs, b, gj, gi, strides[i], tdist)
+
                 # Objectness
                 iou = iou.detach().clamp(0).type(tobj.dtype)
                 if self.sort_obj_iou:
@@ -165,7 +171,7 @@ class ComputeLoss:
                 # dfl
                 if self.use_dfl:
                     tdist = bbox2dist(an_p, xywh2xyxy(tbox[i]), self.reg_max)
-                    ldfl += self._df_loss(pdist.reshape([-1, 4, self.reg_max + 1]).contiguous(), tdist).mean()
+                    ldfl += self._df_loss(pdist.view([-1, 4, self.reg_max + 1]).contiguous(), tdist).mean()
 
                 # Classification
                 if self.nc > 1:  # cls loss (only if multiple classes)
@@ -177,7 +183,7 @@ class ComputeLoss:
                 # with open('targets.txt', 'a') as file:
                 #     [file.write('%11.5g ' * 4 % tuple(x) + '\n') for x in torch.cat((txy[i], twh[i]), 1)]
 
-            obji = self.BCEobj(pi[:, 4], tobj)
+            obji = self.BCEobj(pi[:, (self.reg_max + 1) * 4], tobj)
             lobj += obji * self.balance[i]  # obj loss
             if self.autobalance:
                 self.balance[i] = self.balance[i] * 0.9999 + 0.0001 / obji.detach().item()
@@ -267,3 +273,33 @@ class ComputeLoss:
             F.cross_entropy(pred_dist.view(-1, self.reg_max + 1), target_right.view(-1), reduction="none").view(target_left.shape) * weight_right
         )
         return (loss_left + loss_right).mean(-1, keepdim=True)
+
+    def vis_assignments(self, imgs, b, gj, gi, stride, tdist):
+        imgs = imgs.permute(0, 2, 3, 1).contiguous().cpu().numpy()  # b, h, w, 3
+        bs, h, w, _ = imgs.shape
+        fg_mask = torch.zeros((bs, h // stride, w // stride), dtype=torch.uint8)
+        tdist = torch.as_tensor(tdist, dtype=torch.long)
+        for bi in b.unique():
+            index = b == bi
+            y = torch.as_tensor(gj[index], dtype=torch.long)
+            x = torch.as_tensor(gi[index], dtype=torch.long)
+            fg_mask[b[index], y, x] = 1
+
+            for jj in range(len(x)):
+                x1 = tdist[index][:, 0]
+                fg_mask[b[index][jj], y[jj], (x - x1)[jj]:x[jj]] = 1
+                y1 = tdist[index][:, 1]
+                fg_mask[b[index][jj], (y - y1)[jj]:y[jj], x[jj]] = 1
+                x2 = tdist[index][:, 2]
+                fg_mask[b[index][jj], y[jj], x[jj]:(x + x2)[jj]] = 1
+                y2 = tdist[index][:, 3]
+                fg_mask[b[index][jj], y[jj]:(y + y2)[jj], x[jj]] = 1
+
+        fg_mask = F.interpolate(fg_mask[None], (640, 640), mode="nearest")[0].cpu().numpy()
+        for i in range(len(imgs)):
+            img = imgs[i]
+            fg = fg_mask[i]
+            img[fg.astype(bool)] = img[fg.astype(bool)] * 0.35 + (np.array((0, 0, 255)) * 0.65)
+            cv2.imshow("p", img)
+            if cv2.waitKey(0) == ord("q"):
+                exit()

@@ -389,7 +389,7 @@ class ComputeLoss:
         return (lbox + lobj + lcls + ldfl) * bs, torch.as_tensor([lbox, ldfl, lcls], device=lbox.device).detach()
 
     def vis_assignments(self, fg_mask, imgs):
-        imgs = img.permute(0, 2, 3, 1).contiguous().numpy()  # b, h, w, 3
+        imgs = imgs.permute(0, 2, 3, 1).contiguous().numpy()  # b, h, w, 3
         first, second, third = fg_mask.split((80 * 80, 40 * 40, 20 * 20), -1)
         first = F.interpolate(first.view(1, first.shape[0], 80, 80).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
         second = F.interpolate(second.view(1, second.shape[0], 40, 40).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
