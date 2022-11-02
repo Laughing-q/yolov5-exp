@@ -47,31 +47,40 @@ def select_candidates_in_gts(xy_centers, gt_bboxes, eps=1e-9):
     return (bbox_deltas.min(axis=-1)[0] > eps).to(gt_bboxes.dtype)
 
 
-def select_highest_overlaps(mask_pos, overlaps, n_max_boxes):
+def select_highest_overlaps(mask_pos, overlaps, bidx, gt_labels, gt_bboxes):
     """if an anchor box is assigned to multiple gts,
         the one with the highest iou will be selected.
 
     Args:
         mask_pos (Tensor): shape(tn, h*w)
         overlaps (Tensor): shape(tn, h*w)
+        gt_labels (Tensor): shape(tn, 1)
+        gt_bboxes (Tensor): shape(tn, 4)
     Return:
         target_gt_idx (Tensor): shape(b, h*w)
         fg_mask (Tensor): shape(b, h*w)
         mask_pos (Tensor): shape(b, n_max_boxes, h*w)
     """
-    # (b, n_max_boxes, h*w) -> (b, h*w)
-    fg_mask = mask_pos.sum(axis=-2)
-    if fg_mask.max() > 1:  # one anchor is assigned to multiple gt_bboxes
-        mask_multi_gts = (fg_mask.unsqueeze(1) > 1).repeat([1, n_max_boxes, 1]) # (b, n_max_boxes, h*w)
-        max_overlaps_idx = overlaps.argmax(axis=1) # (b, h*w)
-        is_max_overlaps = F.one_hot(max_overlaps_idx, n_max_boxes)  # (b, h*w, n_max_boxes)
-        is_max_overlaps = is_max_overlaps.permute(0, 2, 1).to(overlaps.dtype) # (b, n_max_boxes, h*w)
-        mask_pos = torch.where(mask_multi_gts, is_max_overlaps, mask_pos) # (b, n_max_boxes, h*w)
-        fg_mask = mask_pos.sum(axis=-2)
-    # find each grid serve which gt(index)
-    target_gt_idx = mask_pos.argmax(axis=-2) # (b, h*w)
-    return target_gt_idx, fg_mask, mask_pos
-
+    final_mask_pos = []
+    fg_mask = []
+    for b in bidx.unique():
+        index = bidx == b
+        fg_maski = mask_pos[index].sum(0)  # (h*w, )
+        ni = index.sum()
+        mask_posi = mask_pos[index]
+        if fg_mask.max() > 1:
+            mask_multi_gts = (fg_maski.unsqueeze(0) > 1).repeat([1, ni])   # (ni, h*w)
+            # TODO
+            max_overlaps_idx = overlaps[index].max(0)  # (h*w, )
+            is_max_overlaps = F.one_hot(max_overlaps_idx, ni)  # (h*w, ni)
+            is_max_overlaps = is_max_overlaps.T.to(overlaps.dtype) # (ni, h*w)
+            mask_posi = torch.where(mask_multi_gts, is_max_overlaps, mask_posi) # (ni, h*w)
+            fg_maski = mask_posi.sum(0)  # (h*w)
+        final_mask_pos.append(mask_posi)
+        fg_mask.append(fg_maski)
+    final_mask_pos = torch.cat(final_mask_pos)
+    fg_mask = torch.stack(fg_mask, dim=0)
+    return final_mask_pos, fg_mask
 
 def iou_calculator(box1, box2, eps=1e-9):
     """Calculate iou for batch
