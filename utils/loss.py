@@ -155,6 +155,11 @@ class ComputeLoss:
                 if self.gr < 1:
                     iou = (1.0 - self.gr) + self.gr * iou
                 tobj[b, gj, gi] = iou  # iou ratio
+                # temp = torch.cat([b[None], gj[None], gi[None]], dim=0)
+                # unique = torch.unique(temp, dim=1)
+                # if unique.shape[-1] != temp.shape[-1]:
+                #     print(temp.shape, unique.shape)
+                #     exit()
 
                 # Classification
                 if self.nc > 1:  # cls loss (only if multiple classes)

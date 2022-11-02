@@ -12,7 +12,7 @@ import cv2
 
 from utils.metrics import bbox_iou
 from utils.torch_utils import de_parallel
-from utils.tal.assigner import TaskAlignedAssigner, ATSSAssigner
+from utils.tal.assigner_v2 import TaskAlignedAssignerV2
 from utils.tal.anchor_generator import dist2bbox, generate_anchors, bbox2dist
 from utils.general import xywh2xyxy, xyxy2xywh
 
@@ -211,7 +211,7 @@ class BboxLoss(nn.Module):
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
         # iou loss
-        bbox_mask = fg_mask.unsqueeze(-1).repeat([1, 1, 4])  # (b, h*w, 4)
+        bbox_mask = fg_mask.unsqueeze(-1).repeat([1, 1, 4])  # (tn, grids, 4)
         pred_bboxes_pos = torch.masked_select(pred_bboxes, bbox_mask).reshape([-1, 4])
         target_bboxes_pos = torch.masked_select(target_bboxes, bbox_mask).reshape([-1, 4])
         bbox_weight = torch.masked_select(target_scores.sum(-1), fg_mask).unsqueeze(-1)
@@ -222,7 +222,7 @@ class BboxLoss(nn.Module):
 
         # dfl loss
         if self.use_dfl:
-            dist_mask = fg_mask.unsqueeze(-1).repeat([1, 1, (self.reg_max + 1) * 4])
+            dist_mask = fg_mask.unsqueeze(-1).repeat([1, 1, (self.reg_max + 1) * 4])  # tn, grids, 17*4
             pred_dist_pos = torch.masked_select(pred_dist, dist_mask).reshape([-1, 4, self.reg_max + 1])
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.reg_max)
             target_ltrb_pos = torch.masked_select(target_ltrb, bbox_mask).reshape([-1, 4])
@@ -251,7 +251,7 @@ class ComputeLoss:
     sort_obj_iou = False
 
     # Compute losses
-    def __init__(self, model, autobalance=False, atss_epochs=0, use_dfl=False):
+    def __init__(self, model, autobalance=False, use_dfl=False):
         device = next(model.parameters()).device  # get model device
         h = model.hyp  # hyperparameters
 
@@ -276,25 +276,17 @@ class ComputeLoss:
         self.anchors = m.anchors
         self.device = device
 
-        self.assigner = TaskAlignedAssigner(topk=13, num_classes=self.nc, alpha=1.0, beta=6.0)
-        self.warmup_assigner = ATSSAssigner(9, num_classes=self.nc)
+        self.assigner = TaskAlignedAssignerV2(topk=13, num_classes=self.nc, alpha=1.0, beta=6.0)
         self.bbox_loss = BboxLoss(16, use_dfl=use_dfl, iou_type="ciou").cuda()
         self.varifocal_loss = VarifocalLoss().cuda()
-        self.atss_epochs = atss_epochs
         self.reg_max = 16 if use_dfl else 0
         self.use_dfl = use_dfl
         self.proj = nn.Parameter(torch.linspace(0, self.reg_max, self.reg_max + 1), requires_grad=False)
 
-    def preprocess(self, targets, batch_size, scale_tensor):
-        targets_list = np.zeros((batch_size, 1, 5)).tolist()
-        for i, item in enumerate(targets.cpu().numpy().tolist()):
-            targets_list[int(item[0])].append(item[1:])
-        max_len = max((len(l) for l in targets_list))
-        targets = torch.from_numpy(np.array(list(map(lambda l: l + [[-1, 0, 0, 0, 0]] * (max_len - len(l)), targets_list)))[:, 1:, :]).to(
-            targets.device
-        )
-        batch_target = targets[:, :, 1:5].mul_(scale_tensor)
-        targets[..., 1:] = xywh2xyxy(batch_target)
+    def preprocess(self, targets, scale_tensor):
+        # (n, 6)
+        batch_target = targets[:, 2:].mul_(scale_tensor)
+        targets[..., 2:] = xywh2xyxy(batch_target)
         return targets
 
     def bbox_decode(self, anchor_points, pred_dist):
@@ -311,51 +303,52 @@ class ComputeLoss:
         ldfl = torch.zeros(1, device=self.device)  # object loss
 
         feats, pred_obj, pred_scores, pred_distri = p
+        # (grids, 1), (grids, 2)
         anchors, anchor_points, n_anchors_list, stride_tensor = generate_anchors(feats, torch.tensor([8, 16, 32]), 5.0, 0.5, device=feats[0].device)
 
         gt_bboxes_scale = torch.full((1, 4), 640).type_as(pred_scores)
-        batch_size, grid_size = pred_scores.shape[:2]
+        # batch_size, grid_size = pred_scores.shape[:2]
 
         # targets
-        targets = self.preprocess(targets, batch_size, gt_bboxes_scale)
-        gt_labels = targets[:, :, :1]
-        gt_bboxes = targets[:, :, 1:]  # xyxy
-        mask_gt = (gt_bboxes.sum(-1, keepdim=True) > 0).float()
+        # (tn, 6)
+        targets = self.preprocess(targets, gt_bboxes_scale)
+        gt_labels = targets[:, 1:2]  # (tn, 1)
+        gt_bboxes = targets[:, 2:]  # xyxy, (tn, 4)
+        bi = targets[:, 0].long()
 
         # pboxes
-        anchor_points_s = anchor_points / stride_tensor
-        pred_bboxes = self.bbox_decode(anchor_points_s, pred_distri)  # xyxy, (b, h*w, 4)
+        anchor_points_s = anchor_points / stride_tensor  # (grids, 2)
+        pred_bboxes = self.bbox_decode(anchor_points_s, pred_distri)[bi]  # xyxy, (tn, grids, 4)
+        pred_scores = pred_scores[bi]  # (tn, grids, nc)
+        pred_obj = pred_obj[bi]
 
-        if epoch < self.atss_epochs:
-            target_labels, target_bboxes, target_scores, fg_mask = self.warmup_assigner(
-                anchors, n_anchors_list, gt_labels, gt_bboxes, mask_gt, pred_bboxes.detach() * stride_tensor
-            )
-        else:
-            target_labels, target_bboxes, target_scores, fg_mask = self.assigner(
-                pred_scores.detach().sigmoid(),
-                pred_bboxes.detach() * stride_tensor,
-                anchor_points,
-                gt_labels,
-                gt_bboxes,
-                mask_gt,
-            )
+        target_labels, target_bboxes, target_scores, fg_mask = self.assigner(
+            pred_scores.detach().sigmoid(),
+            pred_bboxes.detach() * stride_tensor,
+            anchor_points,
+            gt_labels,
+            gt_bboxes,
+        )
 
-        pred_obj = pred_obj.view(batch_size, grid_size)
+        pred_obj = pred_obj.squeeze()
         tobj = torch.zeros_like(pred_obj)
 
         target_bboxes /= stride_tensor
 
         target_scores_sum = target_scores.sum()
+        # if img is not None:
+        #     self.vis_assignments(fg_mask, img, bi.cpu().numpy())
 
         # cls loss
         # target_labels = F.one_hot(target_labels, self.nc)  # (b, h*w, 80)
         # lcls = self.BCEcls(pred_scores[fg_mask], target_scores[fg_mask].to(pred_scores.dtype))  # BCE
-        target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.nc))
-        target_labels = F.one_hot(target_labels.long(), self.nc + 1)[..., :-1]
-        # lcls = self.BCEcls(pred_scores, target_scores.to(pred_scores.dtype)).sum()  # BCE
+        # target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.nc))
+        # target_labels = F.one_hot(target_labels.long(), self.nc + 1)[..., :-1]
+        # TODO: there're repeated objects
+        lcls = self.BCEcls(pred_scores, target_scores.to(pred_scores.dtype)).sum()  # BCE
 
         # VFL way
-        lcls = self.varifocal_loss(pred_scores, target_scores, target_labels)
+        # lcls = self.varifocal_loss(pred_scores, target_scores, target_labels)
         lcls /= target_scores_sum
 
         num_pos = fg_mask.sum()
@@ -363,7 +356,7 @@ class ComputeLoss:
         if num_pos:
             # lcls = self.BCEcls(pred_scores[fg_mask], target_scores[fg_mask].to(pred_scores.dtype)).mean()  # BCE
             # bbox loss
-            lbox, ldfl, iou = self.bbox_loss(pred_distri, 
+            lbox, ldfl, iou = self.bbox_loss(pred_distri[bi], 
                                              pred_bboxes, 
                                              anchor_points_s, 
                                              target_bboxes, 
@@ -388,19 +381,18 @@ class ComputeLoss:
 
         return (lbox + lobj + lcls + ldfl) * bs, torch.as_tensor([lbox, ldfl, lcls], device=lbox.device).detach()
 
-    def vis_assignments(self, fg_mask, imgs):
+    def vis_assignments(self, fg_mask, imgs, bi):
         imgs = imgs.permute(0, 2, 3, 1).contiguous().numpy()  # b, h, w, 3
         first, second, third = fg_mask.split((80 * 80, 40 * 40, 20 * 20), -1)
         first = F.interpolate(first.view(1, first.shape[0], 80, 80).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
         second = F.interpolate(second.view(1, second.shape[0], 40, 40).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
         third = F.interpolate(third.view(1, third.shape[0], 20, 20).to(torch.uint8), (640, 640), mode="nearest")[0].cpu().numpy()
-        # print("iou:", iou.detach().clamp(0).type(tobj.dtype))
-        # print("pred:", pred_obj.sigmoid())
-        # print("pred-pos:", pred_obj.sigmoid()[fg_mask])
         for i in range(len(imgs)):
+            index = bi == i
             img = imgs[i]
-            fg = first[i] + second[i] + third[i]
-            img[fg.astype(bool)] = img[fg.astype(bool)] * 0.35 + (np.array((0, 0, 255)) * 0.65)
+            fg = first[index] + second[index] + third[index]
+            for j in range(len(fg)):
+                img[fg[j].astype(bool)] = img[fg[j].astype(bool)] * 0.35 + (np.array((0, 0, 255)) * 0.65)
             cv2.imshow("p", img)
             if cv2.waitKey(0) == ord("q"):
                 exit()
