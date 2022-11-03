@@ -350,12 +350,12 @@ class ComputeLoss:
         # cls loss
         # target_labels = F.one_hot(target_labels, self.nc)  # (b, h*w, 80)
         # lcls = self.BCEcls(pred_scores[fg_mask], target_scores[fg_mask].to(pred_scores.dtype))  # BCE
-        target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.nc))
-        target_labels = F.one_hot(target_labels.long(), self.nc + 1)[..., :-1]
-        # lcls = self.BCEcls(pred_scores, target_scores.to(pred_scores.dtype)).sum()  # BCE
+        # target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.nc))
+        # target_labels = F.one_hot(target_labels.long(), self.nc + 1)[..., :-1]
+        lcls = self.BCEcls(pred_scores, target_scores.to(pred_scores.dtype)).sum()  # BCE
 
         # VFL way
-        lcls = self.varifocal_loss(pred_scores, target_scores, target_labels)
+        # lcls = self.varifocal_loss(pred_scores, target_scores, target_labels)
         lcls /= target_scores_sum
 
         num_pos = fg_mask.sum()
