@@ -352,7 +352,7 @@ class ComputeLoss:
         # fg-only
         # lcls = self.BCEcls(pred_scores[fg_mask], target_scores[fg_mask].to(pred_scores.dtype)).mean()  # BCE
 
-        lcls = self.BCEcls(pred_scores, target_scores.to(pred_scores.dtype))  # BCE
+        lcls = self.BCEcls(pred_scores, target_scores.to(pred_scores.dtype)).sum()  # BCE
         lcls /= (target_scores_sum + (~fg_mask).sum())
 
         # VFL way
