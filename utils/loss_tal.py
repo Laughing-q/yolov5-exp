@@ -313,7 +313,8 @@ class ComputeLoss:
         feats, pred_obj, pred_scores, pred_distri = p
         anchors, anchor_points, n_anchors_list, stride_tensor = generate_anchors(feats, torch.tensor([8, 16, 32]), 5.0, 0.5, device=feats[0].device)
 
-        gt_bboxes_scale = torch.full((1, 4), 640).type_as(pred_scores)
+        fh, fw = feats[0].shape[2:]
+        gt_bboxes_scale = torch.tensor([[fw * 8, fh * 8, fw * 8, fh * 8]]).type_as(pred_scores)
         batch_size, grid_size = pred_scores.shape[:2]
 
         # targets
