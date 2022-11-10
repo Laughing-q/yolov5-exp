@@ -341,7 +341,7 @@ class ComputeLoss:
                 mask_gt,
             )
 
-        pred_obj = pred_obj.squeeze()
+        pred_obj = pred_obj.view(batch_size, grid_size)
         tobj = torch.zeros_like(pred_obj)
 
         target_bboxes /= stride_tensor
