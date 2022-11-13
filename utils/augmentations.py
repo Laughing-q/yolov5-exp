@@ -243,14 +243,17 @@ def copy_paste(im, labels, segments, p=0.5):
     if p and n:
         h, w, c = im.shape  # height, width, channels
         im_new = np.zeros(im.shape, np.uint8)
-        for j in random.sample(range(n), k=round(p * n)):
+
+        boxes = np.stack([w - labels[:, 3], labels[:, 2], w - labels[:, 1], labels[:, 4]], axis=-1) # (n, 4)
+        ioa = bbox_ioa(boxes, labels[:, 1:5])  # intersection over area
+        indexs = np.nonzero((ioa < 0.30).all(1))[0]  # (N, )
+        n = len(indexs)
+        for j in random.sample(list(indexs), k=round(p * n)):
             l, s = labels[j], segments[j]
-            box = w - l[3], l[2], w - l[1], l[4]
-            ioa = bbox_ioa(box, labels[:, 1:5])  # intersection over area
-            if (ioa < 0.30).all():  # allow 30% obscuration of existing labels
-                labels = np.concatenate((labels, [[l[0], *box]]), 0)
-                segments.append(np.concatenate((w - s[:, 0:1], s[:, 1:2]), 1))
-                cv2.drawContours(im_new, [segments[j].astype(np.int32)], -1, (255, 255, 255), cv2.FILLED)
+            box = boxes[j]
+            labels = np.concatenate((labels, [[l[0], *box]]), 0)
+            segments.append(np.concatenate((w - s[:, 0:1], s[:, 1:2]), 1))
+            cv2.drawContours(im_new, [segments[j].astype(np.int32)], -1, (255, 255, 255), cv2.FILLED)
 
         result = cv2.bitwise_and(src1=im, src2=im_new)
         result = cv2.flip(result, 1)  # augment segments (flip left-right)
