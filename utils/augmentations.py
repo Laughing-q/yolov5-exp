@@ -253,9 +253,9 @@ def copy_paste(im, labels, segments, p=0.5):
             box = boxes[j]
             labels = np.concatenate((labels, [[l[0], *box]]), 0)
             segments.append(np.concatenate((w - s[:, 0:1], s[:, 1:2]), 1))
-            cv2.drawContours(im_new, [segments[j].astype(np.int32)], -1, (255, 255, 255), cv2.FILLED)
+            cv2.drawContours(im_new, [segments[j].astype(np.int32)], -1, (1, 1, 1), cv2.FILLED)
 
-        result = cv2.bitwise_and(src1=im, src2=im_new)
+        result = im * im_new
         result = cv2.flip(result, 1)  # augment segments (flip left-right)
         i = result > 0  # pixels to replace
         # i[:, :] = result.max(2).reshape(h, w, 1)  # act over ch
