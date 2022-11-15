@@ -144,7 +144,7 @@ class ATSSAssigner(nn.Module):
             return torch.full( [self.bs, self.n_anchors], self.bg_idx).to(device), \
                    torch.zeros([self.bs, self.n_anchors, 4]).to(device), \
                    torch.zeros([self.bs, self.n_anchors, self.num_classes]).to(device), \
-                   torch.zeros([self.bs, self.n_anchors]).to(device)
+                   torch.zeros([self.bs, self.n_anchors], dtype=torch.bool).to(device)
 
 
         overlaps = iou2d_calculator(gt_bboxes.reshape([-1, 4]), anc_bboxes)
