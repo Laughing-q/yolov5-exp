@@ -47,31 +47,37 @@ class V6Detect(nn.Module):
         self.nc = nc  # number of classes
         self.nl = len(ch)  # number of detection layers
         self.reg_max = 16
-        self.no = nc + self.reg_max * 4  # number of outputs per anchor
+        self.no = nc + self.reg_max * 4 + 1  # number of outputs per anchor
         self.inplace = inplace  # use inplace ops (e.g. slice assignment)
         self.stride = torch.zeros(self.nl)  # strides computed during build
 
-        c2, c3 = max(ch[0] // 4, 16), max(ch[0], self.no - 4)  # channels
+        c2, c3 = max(ch[0] // 4, 16), max(ch[0], self.no - 5)  # channels
         self.cv2 = nn.ModuleList(
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
         self.cv3 = nn.ModuleList(
-            nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+            nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc + 1, 1)) for x in ch)
         self.dfl = DFL(self.reg_max)
 
     def forward(self, x):
         shape = x[0].shape  # BCHW
         for i in range(self.nl):
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
-        box, cls = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2).split((self.reg_max * 4, self.nc), 1)
+        y = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], dim=-1)
+        y = y.permute(0, 2, 1).contiguous()  # (b, grids, 85)
+        box, conf, cls = y.split(((self.reg_max) * 4, 1, self.nc), -1)
+
         if self.training:
-            return x, box, cls
+            return x, box, conf, cls
         elif self.dynamic or self.shape != shape:
-            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+            self.anchors, self.strides = (x for x in make_anchors(x, self.stride, 0.5))
             self.shape = shape
 
-        dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
-        y = torch.cat((dbox, cls.sigmoid()), 1)
-        return y if self.export else (y, (x, box, cls))
+        dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True) * self.strides
+        y = torch.cat((dbox, 
+                       conf.sigmoid(),
+                       # torch.ones((shape[0], dbox.shape[1], 1), device=dbox.device, dtype=dbox.dtype),
+                       cls.sigmoid()), -1)
+        return y if self.export else (y, (x, box, conf, cls))
 
     def bias_init(self):
         # Initialize Detect() biases, WARNING: requires stride availability
@@ -80,7 +86,7 @@ class V6Detect(nn.Module):
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
+            b[-1].bias.data[:] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (5 objects and 80 classes per 640 image)
 
 
 class Detect(nn.Module):

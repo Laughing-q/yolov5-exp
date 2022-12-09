@@ -116,6 +116,7 @@ class ComputeLoss:
 
         # Define criteria
         BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h["cls_pw"]], device=device), reduction='none')
+        BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h["obj_pw"]], device=device))
 
         # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
         self.cp, self.cn = smooth_BCE(eps=h.get("label_smoothing", 0.0))  # positive, negative BCE targets
@@ -128,6 +129,7 @@ class ComputeLoss:
         m = de_parallel(model).model[-1]  # Detect() module
         self.balance = {3: [4.0, 1.0, 0.4]}.get(m.nl, [4.0, 1.0, 0.25, 0.06, 0.02])  # P3-P7
         self.BCEcls = BCEcls
+        self.BCEobj = BCEobj
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -166,10 +168,8 @@ class ComputeLoss:
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
     def __call__(self, p, targets, img=None, epoch=0):
-        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
-        feats, pred_distri, pred_scores = p
-        pred_scores = pred_scores.permute(0, 2, 1).contiguous()
-        pred_distri = pred_distri.permute(0, 2, 1).contiguous()
+        loss = torch.zeros(4, device=self.device)  # box, cls, dfl
+        feats, pred_distri, pred_obj, pred_scores = p
 
         dtype = pred_scores.dtype
         batch_size, grid_size = pred_scores.shape[:2]
@@ -192,6 +192,9 @@ class ComputeLoss:
             gt_bboxes,
             mask_gt)
 
+        pred_obj = pred_obj.view(batch_size, grid_size)
+        tobj = torch.zeros_like(pred_obj)
+
         target_bboxes /= stride_tensor
         target_scores_sum = target_scores.sum()
 
@@ -208,9 +211,12 @@ class ComputeLoss:
                                                    target_scores,
                                                    target_scores_sum,
                                                    fg_mask)
+            tobj[fg_mask] = 1
+            loss[3] = self.BCEobj(pred_obj, tobj)
 
         loss[0] *= 7.5  # box gain
         loss[1] *= 0.5  # cls gain
         loss[2] *= 1.5  # dfl gain
+        loss[3] *= 0.7 * 3
 
-        return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
+        return loss.sum() * batch_size, loss[:3].detach()  # loss(box, cls, dfl)

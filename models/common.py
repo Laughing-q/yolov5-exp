@@ -96,9 +96,14 @@ class DFL(nn.Module):
         # self.bn = nn.BatchNorm2d(4)
 
     def forward(self, x):
-        b, c, a = x.shape  # batch, channels, anchors
-        return self.conv(x.view(b, 4, self.c1, a).transpose(2, 1).softmax(1)).view(b, 4, a)
+        # b, c, a = x.shape  # batch, channels, anchors
+        # return self.conv(x.view(b, 4, self.c1, a).transpose(2, 1).softmax(1)).view(b, 4, a)
         # return self.conv(x.view(b, self.c1, 4, a).softmax(1)).view(b, 4, a)
+        b = x.shape[0]  # batch, channels, anchors
+        dfl_bbox = x.reshape([b, -1, 4, 16]).permute(0, 3, 2, 1)  # b, reg_max, 4, grids
+        dfl_bbox = self.conv(F.softmax(dfl_bbox, dim=1)).view(b, 4, -1)  # b, 4, grids
+        dfl_bbox = dfl_bbox.permute(0, 2, 1).contiguous()  # b, grids, 4
+        return dfl_bbox
 
 
 class TransformerLayer(nn.Module):
