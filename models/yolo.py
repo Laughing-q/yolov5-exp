@@ -43,16 +43,16 @@ class V6Detect(nn.Module):
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
 
-    def __init__(self, nc=80, ch=(), inplace=True):  # detection layer
+    def __init__(self, nc=80, reg_max=16, ch=(), inplace=True):  # detection layer
         super().__init__()
         self.nc = nc  # number of classes
         self.nl = len(ch)  # number of detection layers
-        self.reg_max = 16
+        self.reg_max = reg_max
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.inplace = inplace  # use inplace ops (e.g. slice assignment)
         self.stride = torch.zeros(self.nl)  # strides computed during build
 
-        c2, c3 = max(ch[0] // 4, 16), max(ch[0], self.no - 4)  # channels
+        c2, c3 = max(ch[0] // 4, 16), max(ch[0], self.nc)  # channels
         self.cv2 = nn.ModuleList(
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
         self.cv3 = nn.ModuleList(
@@ -70,7 +70,7 @@ class V6Detect(nn.Module):
             self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
             self.shape = shape
 
-        dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
+        dbox = dist2bbox(self.dfl(box) if self.reg_max > 1 else box, self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
         y = torch.cat((dbox, cls.sigmoid()), 1)
         return y if self.export else (y, (x, box, cls))
 
@@ -425,14 +425,15 @@ if __name__ == '__main__':
 
     # Create model
     im = torch.rand(opt.batch_size, 3, 640, 640).to(device)
-    if 'scales' in cfg:
-        for s in cfg['scales']:
-            cfg['depth_multiple'], cfg['width_multiple'] = cfg['scales'][s]
-            model = Model(cfg).to(device)
-            model.fuse()
-    else:
-        model = Model(opt.cfg).to(device)
+    # if 'scales' in cfg:
+    #     for s in cfg['scales']:
+    #         cfg['depth_multiple'], cfg['width_multiple'] = cfg['scales'][s]
+    #         model = Model(cfg).to(device)
+    #         model.fuse()
+    # else:
+    model = Model(opt.cfg).to(device)
     model.eval()
+    torch.save({"model": model}, "v8n.pt")
 
     if opt.onnx:
         import onnx
